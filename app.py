@@ -33,11 +33,14 @@ DEFAULT_PROFIL = {
     "name": "Mein Profil",
     "ftp_watt": 270,
     "hr_max": None,
+    "geschlecht": "Männlich",
+    "alter": 30,
     "schweissrate": {
         "preset": "mittel",
         "kalibriert_ml_h": [[10, 250], [15, 300], [20, 350], [25, 450], [99, 600]],
     },
     "flaschen": [{"name": "Trinkflasche", "volumen_ml": 950, "anzahl": 2}],
+    "max_riegel_anzahl": 10,
     "softflask": {
         "volumen_ml": 450, "max_anzahl": 4, "gel_anteil_pct": 70,
         "malto_ratio": 2, "fructose_ratio": 1,
@@ -97,19 +100,61 @@ def get_schweissrate_ml_h(profil, temp):
             break
     return basis
 
+def geschlecht_alter_wasser_faktor(profil):
+    """
+    Korrekturfaktor für Schweißrate nach Geschlecht und Alter.
+    Basis: Sportphysiologie-Literatur (ACSM, Kenefick et al., Gagnon & Kenny).
+    Frauen: –8% absolute Schweißrate (Barr et al., Kolka et al.)
+    Alter 50–59: –8%, Alter 60+: –13% (Inoue et al., Mack & Nadel)
+    Carbs und Koffein: keine Korrektur (<5% Unterschied, zu gering für Praxis).
+    """
+    faktor = 1.0
+    geschlecht = profil.get("geschlecht", "Männlich")
+    alter = profil.get("alter", 30)
+    if geschlecht == "Weiblich":
+        faktor *= 0.92
+    if alter >= 60:
+        faktor *= 0.87
+    elif alter >= 50:
+        faktor *= 0.92
+    return faktor
+
 def berechne_wasser_pro_stunde(profil, temp, sonne, indoor, zone, frueh_start):
     basis = get_schweissrate_ml_h(profil, temp)
     faktor = (SONNEN_FAKTOR.get(sonne, 1.0)
               * INTENSITAETS_FAKTOR.get(zone, 1.0)
               * (1.3 if indoor else 1.0)
-              * (0.9 if frueh_start else 1.0))
+              * (0.9 if frueh_start else 1.0)
+              * geschlecht_alter_wasser_faktor(profil))
     return round(basis * faktor)
 
-def berechne_gel_rezept(profil, carbs_pro_flask, temp):
+def empfehle_glukose_fructose(carbs_pro_h):
+    """
+    Wissenschaftlich empfohlenes Glucose:Fructose-Verhältnis nach Jeukendrup (2014).
+    Basis: SGLT1 transportiert Glucose (max ~60 g/h), GLUT5 transportiert Fructose (max ~50 g/h).
+    Erst ab 60 g/h ist Fructose sinnvoll, weil SGLT1 dann saturiert ist.
+    """
+    if carbs_pro_h <= 60:
+        return (1, 0, "Nur Maltodextrin/Glucose (SGLT1 noch nicht saturiert, Fructose nicht nötig)")
+    elif carbs_pro_h <= 80:
+        return (2, 1, "2:1 Maltodextrin:Fructose (klassisches Verhältnis für 60–80 g/h)")
+    elif carbs_pro_h <= 100:
+        return (5, 4, "~1:0.8 Maltodextrin:Fructose (optimiert für 80–100 g/h, max. Darmaufnahme)")
+    else:
+        return (1, 1, "1:1 Maltodextrin:Fructose (maximale Absorption >100 g/h, beide Transporter voll ausgelastet)")
+
+
+def berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h=None):
     sf = profil["softflask"]
-    total = sf["malto_ratio"] + sf["fructose_ratio"]
-    malto = round(carbs_pro_flask * sf["malto_ratio"] / total)
-    fructose = round(carbs_pro_flask * sf["fructose_ratio"] / total)
+    # Dynamisches Verhältnis wenn carbs_pro_h bekannt, sonst Profil-Einstellung
+    if carbs_pro_h is not None:
+        malto_ratio, fructose_ratio, _ = empfehle_glukose_fructose(carbs_pro_h)
+    else:
+        malto_ratio = sf["malto_ratio"]
+        fructose_ratio = sf["fructose_ratio"]
+    total = malto_ratio + fructose_ratio
+    malto = round(carbs_pro_flask * malto_ratio / total)
+    fructose = round(carbs_pro_flask * fructose_ratio / total)
     salz = sf["salz_heiss_g"] if temp > sf["temp_heiss_grad"] else sf["salz_normal_g"]
     wasser = sf["volumen_ml"] - carbs_pro_flask - 1
     return {"maltodextrin": malto, "fructose": fructose, "salz": salz, "wasser": max(0, wasser)}
@@ -138,17 +183,24 @@ def berechne_riegel_plan(profil, carbs_aus_riegeln, dauer_h, zone):
     ]
 
 def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
-                   distanz_km=None, hoehenmeter=None, watt=None, ftp=None, hf=None):
+                   distanz_km=None, hoehenmeter=None, watt=None, ftp=None, hf=None,
+                   carbs_pro_h_override=None, wasser_pro_h_override=None, mix_intervalle=None):
     if watt and ftp:
         carbs_pro_h = berechne_carbs_pro_h_aus_watt(watt, ftp)
         carbs_quelle = f"Watt ({watt} W @ FTP {ftp} W)"
+    elif carbs_pro_h_override is not None:
+        carbs_pro_h = carbs_pro_h_override
+        carbs_quelle = f"Mix-Intervalle (Ø {carbs_pro_h:.0f} g/h gewichtet)"
     else:
         carbs_pro_h = CARBS_PRO_STUNDE.get(zone, 60)
         carbs_quelle = f"Zone {zone}"
     carbs_basis = round(carbs_pro_h * dauer_h)
     hm_bonus = round(hoehenmeter / 100 * HOEHENMETER_CARBS_BONUS_PRO_100HM) if hoehenmeter else 0
     carbs_gesamt = carbs_basis + hm_bonus
-    wasser_pro_h = berechne_wasser_pro_stunde(profil, temp, sonne, indoor, zone, frueh_start)
+    if wasser_pro_h_override is not None:
+        wasser_pro_h = wasser_pro_h_override
+    else:
+        wasser_pro_h = berechne_wasser_pro_stunde(profil, temp, sonne, indoor, zone, frueh_start)
     wasser_gesamt = round(wasser_pro_h * dauer_h)
     sf = profil["softflask"]
     gel_anteil = sf["gel_anteil_pct"] / 100
@@ -187,7 +239,8 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
                    "zusaetzlich": wasser_zusaetzlich, "flaschen_kapazitaet_ml": flaschen_kapazitaet_ml,
                    "refill_ml": refill_ml},
         "softflasks": {"anzahl": anzahl_flasks, "carbs_pro_flask": carbs_pro_flask,
-                       "rezept": berechne_gel_rezept(profil, carbs_pro_flask, temp)},
+                       "rezept": berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h),
+                       "ratio_info": empfehle_glukose_fructose(carbs_pro_h)},
         "riegel": riegel_plan,
         "wasserflaschen": {"konfiguration": profil["flaschen"], "kapazitaet_ml": flaschen_kapazitaet_ml,
                            "auffuellungen": auffuellungen_noetig, "refill_ml": refill_ml},
@@ -195,6 +248,7 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
                         "fuellungen": fuellungen, "mineralien": mineralien_gesamt,
                         "min_pro_portion": min_profil},
         "koffein": koffein, "distanz_km": distanz_km, "hoehenmeter": hoehenmeter,
+        "mix_intervalle": mix_intervalle,
     }
 
 def hole_wetterdaten(latitude, longitude, datum, start_h, dauer_h):
@@ -278,7 +332,7 @@ def parse_gpx(gpx_bytes):
     except Exception:
         return None
 
-def suche_nahe_pois(lat, lon, radius_m=3000):
+def suche_nahe_pois(lat, lon, radius_m=1500):
     def _haversine_m(la1, lo1, la2, lo2):
         R = 6_371_000.0
         p1, p2 = math.radians(la1), math.radians(la2)
@@ -316,6 +370,131 @@ def suche_nahe_pois(lat, lon, radius_m=3000):
         return treffer[:3]
     except Exception:
         return []
+
+def km_zu_gpx_koordinaten(route, ziel_km):
+    """Gibt die Routenkoordinaten am nächsten GPX-Punkt zur gegebenen km-Position zurück."""
+    kum = route["kumulative_distanzen"]
+    points = route["points"]
+    idx = next((i for i, d in enumerate(kum) if d >= ziel_km), len(kum) - 1)
+    lat, lon, _ = points[idx]
+    return lat, lon
+
+
+def berechne_resupply_stopps(profil, plan, route):
+    """
+    Berechnet kombinierte Wasser- und Carb-Resupply-Punkte entlang der Route.
+    Stopps liegen an echten GPX-Routenpunkten (nicht am Start).
+    Wasser: Stopp bei 82% verbraucht (~18% Reserve).
+    Carbs:  Stopp bei 80% der Tragekapazität verbraucht.
+    Stopps innerhalb von 15 km werden zusammengelegt.
+    """
+    if not route:
+        return []
+
+    distanz_km = route["distanz_km"]
+    if distanz_km <= 0:
+        return []
+
+    # ── Wasser-Stopps ────────────────────────────────────────────────────────
+    wasser_stopps = []
+    wasser_zusaetzlich = plan["wasser"]["zusaetzlich"]
+    auffuellungen = plan["wasserflaschen"]["auffuellungen"]
+
+    if wasser_zusaetzlich > 0 and auffuellungen > 0:
+        wasser_pro_km = wasser_zusaetzlich / distanz_km
+        km_bisher = 0.0
+        wasser_aktuell = float(plan["wasser"]["flaschen_kapazitaet_ml"])
+        refill_ml = plan["wasserflaschen"]["refill_ml"]
+
+        for _ in range(auffuellungen):
+            km_stop = km_bisher + (wasser_aktuell * AUFFUELL_BUFFER_PCT) / wasser_pro_km
+            km_stop = min(km_stop, distanz_km * 0.95)
+            rest_ml = round(wasser_aktuell * (1 - AUFFUELL_BUFFER_PCT))
+            wasser_stopps.append({
+                "km": round(km_stop, 1),
+                "wasser_rest_ml": rest_ml,
+                "wasser_refill_ml": refill_ml,
+                "braucht_wasser": True,
+                "braucht_carbs": False,
+                "carbs_rest_g": None,
+                "carbs_einkauf_g": None,
+            })
+            km_bisher = km_stop
+            wasser_aktuell = rest_ml + refill_ml
+
+    # ── Carb-Stopps ──────────────────────────────────────────────────────────
+    carb_stopps = []
+    max_riegel = profil.get("max_riegel_anzahl", 0)
+    aktive_riegel = [r for r in profil["riegel"] if r["aktiv"]]
+    carbs_aus_riegeln = plan["carbs"]["aus_riegeln"]
+
+    if max_riegel > 0 and aktive_riegel and carbs_aus_riegeln > 0:
+        avg_carbs = sum(r["carbs_g"] for r in aktive_riegel) / len(aktive_riegel)
+        kapazitaet_g = max_riegel * avg_carbs
+        carbs_pro_km = carbs_aus_riegeln / distanz_km
+        CARB_BUFFER = 0.80
+
+        km_bisher = 0.0
+        vorrat_g = kapazitaet_g
+        carbs_verbleibend = carbs_aus_riegeln
+
+        while km_bisher < distanz_km * 0.90:
+            km_stop = km_bisher + (vorrat_g * CARB_BUFFER) / carbs_pro_km
+            km_stop = min(km_stop, distanz_km * 0.95)
+            if km_stop >= distanz_km * 0.88:
+                break
+            rest_g = round(vorrat_g * (1 - CARB_BUFFER))
+            verbraucht = round((km_stop - km_bisher) * carbs_pro_km)
+            carbs_verbleibend = max(0, carbs_verbleibend - verbraucht)
+            einkauf_g = max(0, round(min(carbs_verbleibend, kapazitaet_g) - rest_g))
+            carb_stopps.append({
+                "km": round(km_stop, 1),
+                "braucht_wasser": False,
+                "braucht_carbs": True,
+                "wasser_rest_ml": None,
+                "wasser_refill_ml": None,
+                "carbs_rest_g": rest_g,
+                "carbs_einkauf_g": einkauf_g,
+                "carbs_verbleibend_g": carbs_verbleibend,
+            })
+            km_bisher = km_stop
+            vorrat_g = rest_g + einkauf_g
+
+    # ── Stopps zusammenführen ─────────────────────────────────────────────────
+    MERGE_RADIUS_KM = 15.0
+    alle = []
+    used_carb = set()
+
+    for ws in wasser_stopps:
+        merged = dict(ws)
+        for ci, cs in enumerate(carb_stopps):
+            if ci in used_carb:
+                continue
+            if abs(cs["km"] - ws["km"]) <= MERGE_RADIUS_KM:
+                merged["braucht_carbs"] = True
+                merged["carbs_rest_g"] = cs["carbs_rest_g"]
+                merged["carbs_einkauf_g"] = cs["carbs_einkauf_g"]
+                merged["carbs_verbleibend_g"] = cs.get("carbs_verbleibend_g")
+                merged["km"] = round((ws["km"] + cs["km"]) / 2, 1)
+                used_carb.add(ci)
+                break
+        alle.append(merged)
+
+    for ci, cs in enumerate(carb_stopps):
+        if ci not in used_carb:
+            alle.append(dict(cs))
+
+    alle.sort(key=lambda x: x["km"])
+
+    # ── GPX-Koordinaten zuweisen ──────────────────────────────────────────────
+    for stopp in alle:
+        lat, lon = km_zu_gpx_koordinaten(route, stopp["km"])
+        stopp["lat"] = lat
+        stopp["lon"] = lon
+        stopp["pois"] = []
+
+    return alle
+
 
 def schaetze_dauer(distanz_km, hoehenmeter, zone="Z2"):
     v = {"Z1": 22, "Z2": 24, "Z3": 28, "Z4": 32, "Z5": 32, "Mix": 25}.get(zone, 24)
@@ -390,8 +569,12 @@ if "wetter_info" not in st.session_state:
     st.session_state.wetter_info = None
 if "gpx_data" not in st.session_state:
     st.session_state.gpx_data = None
-if "pois" not in st.session_state:
-    st.session_state.pois = None
+if "resupply_stopps" not in st.session_state:
+    st.session_state.resupply_stopps = None
+if "intensitaet_modus" not in st.session_state:
+    st.session_state.intensitaet_modus = "Zone manuell wählen"
+if "intervalle" not in st.session_state:
+    st.session_state.intervalle = [{"zone": "Z2", "watt": None, "hf": None, "dauer_min": 60}]
 
 profil = st.session_state.profil
 
@@ -406,11 +589,12 @@ with st.sidebar:
     profil["name"] = st.text_input("Name", value=profil["name"])
 
     # ── FTP ──
-    profil["ftp_watt"] = st.slider(
+    profil["ftp_watt"] = st.number_input(
         "FTP (Watt)",
-        min_value=100, max_value=500, value=profil["ftp_watt"], step=5,
+        min_value=50, max_value=600,
+        value=int(profil["ftp_watt"]), step=5,
         help="Functional Threshold Power – deine Schwellenleistung in Watt. "
-             "Wenn du keinen Leistungsmesser hast, lass den Standardwert."
+             "Wenn du keinen Leistungsmesser hast, lass den Standardwert (270 W)."
     )
 
     # ── HRmax ──
@@ -424,6 +608,32 @@ with st.sidebar:
              "Leer lassen = Zone manuell oder per Watt."
     )
     profil["hr_max"] = int(hr_val) if hr_val > 0 else None
+
+    # ── Geschlecht & Alter ──
+    cols = st.columns(2)
+    profil["geschlecht"] = cols[0].selectbox(
+        "Geschlecht",
+        ["Männlich", "Weiblich"],
+        index=0 if profil.get("geschlecht", "Männlich") == "Männlich" else 1,
+        help=(
+            "Biologisches Geschlecht – beeinflusst die Schweißrate und Elektrolytverluste.\n\n"
+            "Frauen schwitzen im Schnitt ca. 8% weniger (in ml/h) als Männer gleicher "
+            "Fitness und Körpergröße. Das beeinflusst die berechnete Trinkmenge und "
+            "den Natriumverlust. Kohlenhydrate und Koffein werden nicht angepasst – "
+            "hier sind die Unterschiede zu gering für die Praxis (<5%)."
+        ),
+    )
+    profil["alter"] = cols[1].number_input(
+        "Alter (Jahre)",
+        min_value=15, max_value=90,
+        value=int(profil.get("alter", 30)), step=1,
+        help=(
+            "Dein Alter in Jahren. Ab 50 Jahren nimmt die Schweißdrüsenaktivität "
+            "messbar ab (50–59: ca. –8%, ab 60: ca. –13% Schweißrate). "
+            "Trainierte Masters-Athleten sind weniger betroffen – bei Unsicherheit "
+            "den Schweißtyp (wenig/mittel/viel) manuell anpassen."
+        ),
+    )
 
     st.divider()
 
@@ -517,6 +727,16 @@ with st.sidebar:
             "carbs_g": 35, "zucker_g": 10, "gewicht_g": 45, "aktiv": True,
         })
         st.rerun()
+
+    profil["max_riegel_anzahl"] = st.number_input(
+        "Max. Riegel/Snacks mitnehmbar (Stück gesamt)",
+        min_value=0, max_value=50,
+        value=int(profil.get("max_riegel_anzahl", 10)),
+        step=1,
+        help="Wie viele Riegel kannst du insgesamt in Trikottaschen und Rahmentasche verstauen? "
+             "Das bestimmt, wann du unterwegs Nachschub kaufen musst. "
+             "0 = keine Begrenzung (kein Carb-Resupply wird berechnet)."
+    )
 
     st.divider()
 
@@ -613,6 +833,182 @@ else:
 
 st.divider()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. TRAININGSINTENSITÄT – außerhalb des Formulars (Mix-Builder braucht Buttons)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.subheader("2. Trainingsintensität")
+
+intensitaet_optionen = ["Zone manuell wählen", "Nach Wattleistung", "Nach Herzfrequenz"]
+if not profil["hr_max"]:
+    intensitaet_optionen = intensitaet_optionen[:2]
+    st.caption("💡 *Herzfrequenz-Option: HRmax im Profil (links) eintragen, um diese Option freizuschalten.*")
+
+intensitaet_modus = st.radio(
+    "Intensitätsmodus", intensitaet_optionen, horizontal=True,
+    index=intensitaet_optionen.index(st.session_state.intensitaet_modus)
+    if st.session_state.intensitaet_modus in intensitaet_optionen else 0,
+    key="intensitaet_radio"
+)
+st.session_state.intensitaet_modus = intensitaet_modus
+
+zone = "Z2"
+watt_eingabe = None
+hf_eingabe = None
+
+ZONE_LABELS = {
+    "Z1": "Z1 – Erholung (30 g/h)",
+    "Z2": "Z2 – Grundlage/Aerob (60 g/h)",
+    "Z3": "Z3 – Tempo/Sweetspot (75 g/h)",
+    "Z4": "Z4 – Schwelle (90 g/h)",
+    "Z5": "Z5 – Maximalintensität (90 g/h)",
+}
+
+if intensitaet_modus == "Zone manuell wählen":
+    zone_optionen_full = {**ZONE_LABELS, "Mix": "Mix – Intervalltraining (Zonen detailliert eingeben)"}
+    zone_raw = st.selectbox(
+        "Trainingszone", list(zone_optionen_full.keys()),
+        index=1, format_func=lambda x: zone_optionen_full[x]
+    )
+    if profil["hr_max"]:
+        hr = profil["hr_max"]
+        st.caption(
+            f"**Deine HF-Zonen** bei HRmax {hr} bpm: "
+            f"Z1 < {round(hr*0.60)} | Z2 {round(hr*0.60)}–{round(hr*0.70)} | "
+            f"Z3 {round(hr*0.70)}–{round(hr*0.80)} | Z4 {round(hr*0.80)}–{round(hr*0.90)} | "
+            f"Z5 > {round(hr*0.90)} bpm"
+        )
+    if zone_raw == "Mix":
+        zone = "Mix"
+    else:
+        zone = zone_raw
+
+elif intensitaet_modus == "Nach Wattleistung":
+    st.caption(f"FTP aus Profil: **{profil['ftp_watt']} W** – Carbs werden physikalisch aus der Leistung berechnet.")
+    # Einfach-Watt oder Mix?
+    watt_modus = st.radio("Watt-Eingabe", ["Einzelne Leistung", "Mix – mehrere Intervalle"], horizontal=True)
+    if watt_modus == "Einzelne Leistung":
+        watt_eingabe = st.number_input(
+            "Durchschnittliche Leistung (Watt)", 50, 600,
+            value=max(50, profil["ftp_watt"] - 30), step=5, key="watt_einzel"
+        )
+        zone = watts_zu_zone(watt_eingabe, profil["ftp_watt"])
+        pct_ftp = round(watt_eingabe / profil["ftp_watt"] * 100)
+        st.caption(f"→ **{watt_eingabe} W** = {pct_ftp}% FTP → Zone **{zone}**")
+    else:
+        zone = "Mix"
+
+elif intensitaet_modus == "Nach Herzfrequenz":
+    hr = profil["hr_max"]
+    st.caption(
+        f"HRmax aus Profil: **{hr} bpm** | "
+        f"Z1 < {round(hr*0.60)} | Z2 {round(hr*0.60)}–{round(hr*0.70)} | "
+        f"Z3 {round(hr*0.70)}–{round(hr*0.80)} | Z4 {round(hr*0.80)}–{round(hr*0.90)} | "
+        f"Z5 > {round(hr*0.90)} bpm"
+    )
+    hf_modus = st.radio("HF-Eingabe", ["Einzelne Herzfrequenz", "Mix – mehrere Intervalle"], horizontal=True)
+    if hf_modus == "Einzelne Herzfrequenz":
+        hf_eingabe = st.number_input(
+            "Durchschnittliche Herzfrequenz (bpm)", 60, 220,
+            value=int(hr * 0.72), step=1, key="hf_einzel"
+        )
+        zone = hf_zu_zone(hf_eingabe, hr)
+        pct_hrmax = round(hf_eingabe / hr * 100)
+        st.caption(f"→ **{hf_eingabe} bpm** = {pct_hrmax}% HRmax → Zone **{zone}**")
+    else:
+        zone = "Mix"
+
+# ── Mix-Intervall-Builder (nur wenn Mix gewählt) ──────────────────────────────
+if zone == "Mix":
+    st.info(
+        "**Intervalltraining:** Trage ein, wie lange du in welcher Zone/Wattleistung/HF fährst. "
+        "Der Plan berechnet dann gewichtete Durchschnittswerte für Carbs und Wasser."
+    )
+    intervalle = st.session_state.intervalle
+
+    intervall_zu_loeschen = None
+    for idx, iv in enumerate(intervalle):
+        with st.container():
+            st.markdown(f"**Intervall {idx + 1}**")
+            cols = st.columns([2, 2, 2, 1])
+
+            # Intensitätseingabe je nach Modus
+            if intensitaet_modus == "Zone manuell wählen":
+                iv["zone"] = cols[0].selectbox(
+                    "Zone", list(ZONE_LABELS.keys()),
+                    index=list(ZONE_LABELS.keys()).index(iv.get("zone", "Z2")),
+                    format_func=lambda x: ZONE_LABELS[x],
+                    key=f"iv_zone_{idx}"
+                )
+                iv["watt"] = None
+                iv["hf"] = None
+                cols[1].markdown("&nbsp;")
+
+            elif intensitaet_modus == "Nach Wattleistung":
+                iv["watt"] = cols[0].number_input(
+                    "Leistung (W)", 50, 600,
+                    value=int(iv.get("watt") or profil["ftp_watt"] - 30),
+                    step=5, key=f"iv_watt_{idx}"
+                )
+                derived_zone = watts_zu_zone(iv["watt"], profil["ftp_watt"])
+                iv["zone"] = derived_zone
+                iv["hf"] = None
+                pct = round(iv["watt"] / profil["ftp_watt"] * 100)
+                cols[1].metric("Zone (abgeleitet)", f"{derived_zone} ({pct}% FTP)")
+
+            elif intensitaet_modus == "Nach Herzfrequenz":
+                iv["hf"] = cols[0].number_input(
+                    "Herzfrequenz (bpm)", 60, 220,
+                    value=int(iv.get("hf") or profil["hr_max"] * 0.72),
+                    step=1, key=f"iv_hf_{idx}"
+                )
+                derived_zone = hf_zu_zone(iv["hf"], profil["hr_max"])
+                iv["zone"] = derived_zone
+                iv["watt"] = None
+                pct = round(iv["hf"] / profil["hr_max"] * 100)
+                cols[1].metric("Zone (abgeleitet)", f"{derived_zone} ({pct}% HRmax)")
+
+            iv["dauer_min"] = cols[2].number_input(
+                "Dauer (Minuten)", 1, 600,
+                value=int(iv.get("dauer_min", 60)),
+                step=5, key=f"iv_dauer_{idx}"
+            )
+            if cols[3].button("🗑️", key=f"iv_del_{idx}", help="Intervall entfernen"):
+                intervall_zu_loeschen = idx
+
+    if intervall_zu_loeschen is not None and len(intervalle) > 1:
+        intervalle.pop(intervall_zu_loeschen)
+        st.rerun()
+
+    cols = st.columns(2)
+    if cols[0].button("➕ Intervall hinzufügen", use_container_width=True):
+        letzte_zone = intervalle[-1].get("zone", "Z2") if intervalle else "Z2"
+        intervalle.append({"zone": letzte_zone, "watt": None, "hf": None, "dauer_min": 30})
+        st.rerun()
+
+    # Zusammenfassung der Intervalle
+    if intervalle:
+        total_min = sum(iv["dauer_min"] for iv in intervalle)
+        gewichtete_carbs = sum(
+            CARBS_PRO_STUNDE.get(iv["zone"], 60) * iv["dauer_min"]
+            for iv in intervalle
+        ) / total_min if total_min > 0 else 60
+        gewichtete_wasser = sum(
+            berechne_wasser_pro_stunde(profil, 18, "mittel", False, iv["zone"], False) * iv["dauer_min"]
+            for iv in intervalle
+        ) / total_min if total_min > 0 else 350
+
+        st.success(
+            f"**Zusammenfassung:** {total_min} min gesamt | "
+            f"Ø {gewichtete_carbs:.0f} g Carbs/h | "
+            f"Ø {gewichtete_wasser:.0f} ml Wasser/h (bei 18 °C)"
+        )
+        st.caption("💡 Wasser wird im Plan mit echter Temperatur berechnet – diese Vorschau nutzt 18 °C als Schätzwert.")
+
+    st.session_state.intervalle = intervalle
+
+st.divider()
+
 # ── Hauptformular ─────────────────────────────────────────────────────────────
 with st.form("planungsformular"):
 
@@ -630,68 +1026,6 @@ with st.form("planungsformular"):
         distanz_km = cols[0].number_input("Distanz (km)", 0.0, 500.0, 80.0, step=5.0)
         hoehenmeter = cols[1].number_input("Höhenmeter aufwärts (m)", 0, 8000, 800, step=100)
         lat_default, lon_default = 51.0, 10.0
-
-    # ── Intensität ──────────────────────────────────────────────────────────
-    st.subheader("2. Trainingsintensität")
-
-    intensitaet_optionen = ["Zone manuell wählen", "Nach Wattleistung", "Nach Herzfrequenz"]
-    if not profil["hr_max"]:
-        intensitaet_optionen = intensitaet_optionen[:2]
-        st.caption("💡 *Herzfrequenz-Option: HRmax im Profil (links) eintragen, um diese Option freizuschalten.*")
-
-    intensitaet_modus = st.radio("Intensitätsmodus", intensitaet_optionen, horizontal=True)
-
-    zone = "Z2"
-    watt_eingabe = None
-    hf_eingabe = None
-
-    if intensitaet_modus == "Zone manuell wählen":
-        zone_optionen = {
-            "Z1": "Z1 – Erholung / sehr locker (30 g Carbs/h)",
-            "Z2": "Z2 – Grundlage / aerob (60 g Carbs/h)",
-            "Z3": "Z3 – Tempo / Sweetspot (75 g Carbs/h)",
-            "Z4": "Z4 – Schwelle / hart (90 g Carbs/h)",
-            "Z5": "Z5 – Maximalintensität (90 g Carbs/h)",
-            "Mix": "Mix – wechselnde Intensität (70 g Carbs/h)",
-        }
-        zone = st.selectbox(
-            "Trainingszone", list(zone_optionen.keys()),
-            index=1, format_func=lambda x: zone_optionen[x]
-        )
-        if profil["hr_max"]:
-            hr = profil["hr_max"]
-            st.caption(
-                f"**Deine HF-Zonen** bei HRmax {hr} bpm: "
-                f"Z1 < {round(hr*0.60)} | Z2 {round(hr*0.60)}–{round(hr*0.70)} | "
-                f"Z3 {round(hr*0.70)}–{round(hr*0.80)} | Z4 {round(hr*0.80)}–{round(hr*0.90)} | "
-                f"Z5 > {round(hr*0.90)} bpm"
-            )
-
-    elif intensitaet_modus == "Nach Wattleistung":
-        st.caption(f"FTP aus Profil: **{profil['ftp_watt']} W** – die Carbs-Menge wird physikalisch aus deiner Leistung berechnet.")
-        watt_eingabe = st.number_input(
-            "Durchschnittliche Leistung (Watt)", 50, 600,
-            value=max(50, profil["ftp_watt"] - 30), step=5
-        )
-        zone = watts_zu_zone(watt_eingabe, profil["ftp_watt"])
-        pct_ftp = round(watt_eingabe / profil["ftp_watt"] * 100)
-        st.caption(f"→ **{watt_eingabe} W** = {pct_ftp}% FTP → Zone **{zone}**")
-
-    elif intensitaet_modus == "Nach Herzfrequenz":
-        hr = profil["hr_max"]
-        st.caption(
-            f"HRmax aus Profil: **{hr} bpm** | "
-            f"Z1 < {round(hr*0.60)} | Z2 {round(hr*0.60)}–{round(hr*0.70)} | "
-            f"Z3 {round(hr*0.70)}–{round(hr*0.80)} | Z4 {round(hr*0.80)}–{round(hr*0.90)} | "
-            f"Z5 > {round(hr*0.90)} bpm"
-        )
-        hf_eingabe = st.number_input(
-            "Durchschnittliche Herzfrequenz (bpm)", 60, 220,
-            value=int(hr * 0.72), step=1
-        )
-        zone = hf_zu_zone(hf_eingabe, hr)
-        pct_hrmax = round(hf_eingabe / hr * 100)
-        st.caption(f"→ **{hf_eingabe} bpm** = {pct_hrmax}% HRmax → Zone **{zone}**")
 
     # ── Dauer ────────────────────────────────────────────────────────────────
     st.subheader("3. Trainingsdauer")
@@ -788,6 +1122,24 @@ if submitted:
         else:
             st.warning("⚠️ Wetterdaten konnten nicht abgerufen werden (kein Internet oder Datum zu weit in der Zukunft). Manuelle Temperatur wird verwendet.")
 
+    # Mix-Modus: gewichtete Carbs und Wasser aus Intervallen berechnen
+    carbs_pro_h_override = None
+    wasser_pro_h_override = None
+    mix_intervalle_snap = None
+    if zone == "Mix" and st.session_state.intervalle:
+        ivs = st.session_state.intervalle
+        total_min = sum(iv["dauer_min"] for iv in ivs)
+        if total_min > 0:
+            carbs_pro_h_override = round(sum(
+                CARBS_PRO_STUNDE.get(iv["zone"], 60) * iv["dauer_min"]
+                for iv in ivs
+            ) / total_min)
+            wasser_pro_h_override = round(sum(
+                berechne_wasser_pro_stunde(profil, temp, sonne, indoor, iv["zone"], frueh_start) * iv["dauer_min"]
+                for iv in ivs
+            ) / total_min)
+            mix_intervalle_snap = [dict(iv) for iv in ivs]
+
     ergebnis = berechne_alles(
         profil=profil,
         dauer_h=float(dauer_h),
@@ -801,11 +1153,14 @@ if submitted:
         watt=float(watt_eingabe) if watt_eingabe else None,
         ftp=float(profil["ftp_watt"]) if watt_eingabe else None,
         hf=float(hf_eingabe) if hf_eingabe else None,
+        carbs_pro_h_override=carbs_pro_h_override,
+        wasser_pro_h_override=wasser_pro_h_override,
+        mix_intervalle=mix_intervalle_snap,
     )
 
     st.session_state.ergebnis = ergebnis
     st.session_state.wetter_info = wetter_info
-    st.session_state.pois = None
+    st.session_state.resupply_stopps = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -830,12 +1185,46 @@ if st.session_state.ergebnis:
     else:
         st.info(f"🎯 Zone **{e['zone']}** | {e['carbs']['quelle']}")
 
+    # Mix-Intervalle anzeigen
+    if e["zone"] == "Mix" and e.get("mix_intervalle"):
+        with st.expander("📊 Intervalldetails", expanded=False):
+            ivs = e["mix_intervalle"]
+            total_min = sum(iv["dauer_min"] for iv in ivs)
+            rows = {"Intervall": [], "Zone": [], "Dauer (min)": [], "Anteil": [], "Carbs/h (g)": []}
+            for i, iv in enumerate(ivs):
+                rows["Intervall"].append(f"#{i+1}")
+                rows["Zone"].append(iv["zone"])
+                rows["Dauer (min)"].append(iv["dauer_min"])
+                rows["Anteil"].append(f"{round(iv['dauer_min'] / total_min * 100)} %")
+                rows["Carbs/h (g)"].append(CARBS_PRO_STUNDE.get(iv["zone"], 60))
+            st.table(rows)
+            st.caption(f"Gesamtdauer der Intervalle: {total_min} min | "
+                       f"Gewichtete Carbs: {e['carbs']['pro_h']} g/h | "
+                       f"Gewichtetes Wasser: {e['wasser']['pro_h']} ml/h")
+
     # ── Kernkennzahlen ──
     cols = st.columns(4)
     cols[0].metric("🍬 Carbs gesamt", f"{e['carbs']['gesamt']} g", f"{e['carbs']['pro_h']} g/h")
     cols[1].metric("💧 Wasser gesamt", f"{e['wasser']['gesamt']} ml", f"{e['wasser']['pro_h']} ml/h")
     cols[2].metric("⏱ Dauer", f"{e['dauer_h']} h")
     cols[3].metric("🌡 Temperatur", f"{e['temp']} °C")
+
+    # Geschlecht/Alter-Korrekturen anzeigen
+    _ga_faktor = geschlecht_alter_wasser_faktor(profil)
+    if _ga_faktor < 1.0:
+        _korrekturen = []
+        if profil.get("geschlecht") == "Weiblich":
+            _korrekturen.append("Geschlecht (Weiblich): –8% Schweißrate")
+        _alter = profil.get("alter", 30)
+        if _alter >= 60:
+            _korrekturen.append(f"Alter ({_alter} J.): –13% Schweißrate")
+        elif _alter >= 50:
+            _korrekturen.append(f"Alter ({_alter} J.): –8% Schweißrate")
+        st.caption(
+            f"ℹ️ Angewandte Korrekturen: {' | '.join(_korrekturen)} "
+            f"→ Gesamtfaktor ×{_ga_faktor:.2f} auf die Trinkmenge. "
+            "Kohlenhydrate und Koffein bleiben unverändert."
+        )
 
     # ── Energiebedarf ──
     with st.expander("🔋 Energiebedarf (Details)", expanded=True):
@@ -863,8 +1252,17 @@ if st.session_state.ergebnis:
                 f"{rez['wasser']} ml",
             ],
         })
-        st.caption("Alle Zutaten in die Softflask geben, Wasser auffüllen, schütteln. "
-                   "Maltodextrin: 2-Teile, Fructose: 1-Teil (optimale Darmaufnahme).")
+        ratio_info = e["softflasks"].get("ratio_info")
+        if ratio_info:
+            r_m, r_f, r_txt = ratio_info
+            ratio_display = ("Nur Maltodextrin (kein Fructose nötig)"
+                             if r_f == 0 else f"{r_m}:{r_f} Maltodextrin:Fructose")
+            st.caption(
+                "Alle Zutaten in die Softflask geben, Wasser auffüllen, schütteln.\n\n"
+                f"💡 **Empfohlenes Verhältnis:** {ratio_display} – {r_txt}"
+            )
+        else:
+            st.caption("Alle Zutaten in die Softflask geben, Wasser auffüllen, schütteln.")
 
     # ── Riegel ──
     if e["riegel"]:
@@ -881,7 +1279,7 @@ if st.session_state.ergebnis:
         st.info("ℹ️ Keine Riegel eingeplant – entweder keine aktiv oder Carbs vollständig aus Gels.")
 
     # ── Wasserflaschen ──
-    with st.expander("🚰 Wasserflaschen & Auffüllstopps", expanded=False):
+    with st.expander("🚰 Wasserflaschen", expanded=False):
         wf = e["wasserflaschen"]
         cols = st.columns(3)
         cols[0].metric("Flaschenkapazität", f"{wf['kapazitaet_ml']} ml")
@@ -894,9 +1292,6 @@ if st.session_state.ergebnis:
             "Anzahl": [f["anzahl"] for f in wf["konfiguration"]],
             "Kapazität gesamt (ml)": [f["volumen_ml"] * f["anzahl"] for f in wf["konfiguration"]],
         })
-        if wf["auffuellungen"] > 0:
-            st.warning(f"⚠️ Du benötigst **{wf['auffuellungen']} Auffüllung(en)** unterwegs (je ~{wf['refill_ml']} ml). "
-                       f"Plane Tankstellen oder Supermärkte auf der Strecke ein.")
 
     # ── Elektrolyte ──
     with st.expander("🧂 Elektrolyte", expanded=False):
@@ -918,6 +1313,15 @@ if st.session_state.ergebnis:
             })
         else:
             st.caption("Keine Mineralwerte eingetragen – im Profil (links) unter Elektrolyte ergänzen.")
+        if profil.get("geschlecht") == "Weiblich":
+            st.info(
+                "💡 **Hinweis für Frauen:** Frauen verlieren aufgrund der geringeren "
+                "Schweißrate im Schnitt ca. 25–30% weniger Natrium pro Stunde als Männer. "
+                "Wenn du mit den berechneten Elektrolytmengen kein Kribbeln, "
+                "Krämpfe oder übermäßigen Durst erlebst, könntest du die Portion leicht "
+                "reduzieren. Individuelle Tests (z.B. mit eigenem Schweiß-Salzgehalt) "
+                "sind genauer als pauschale Schätzwerte."
+            )
 
     # ── Koffein ──
     with st.expander("☕ Koffein-Plan", expanded=False):
@@ -950,31 +1354,106 @@ if st.session_state.ergebnis:
         hinweise.append("⏳ **Langdistanz:** Magen-Darm-Training ist wichtig. Keine neuen Produkte am Wettkampftag einsetzen.")
     if e["zone"] in ("Z4", "Z5"):
         hinweise.append("⚡ **Hohe Intensität (Z4/Z5):** Frühzeitig essen (ab Minute 20), alle 20–25 min nachlegen.")
-    if e["wasserflaschen"]["auffuellungen"] > 0 and not gpx:
-        hinweise.append(f"🗺️ **Auffüllstopps nötig:** Plane {e['wasserflaschen']['auffuellungen']} Stopp(s) ein. GPX-Datei hochladen für automatische Tankstellen-/Supermarktsuche.")
     if hinweise:
         with st.expander("⚠️ Hinweise & Empfehlungen", expanded=True):
             for h in hinweise:
                 st.warning(h)
 
-    # ── POI-Suche ──
-    if gpx and e["wasserflaschen"]["auffuellungen"] > 0:
-        with st.expander("📍 Tankstellen & Supermärkte entlang der Route", expanded=False):
-            st.caption("Suche nach Einkaufsmöglichkeiten in der Nähe des Startpunkts (OpenStreetMap).")
-            if st.button("🔍 Jetzt suchen", use_container_width=True):
-                with st.spinner("Suche läuft …"):
-                    pois = suche_nahe_pois(gpx["start_lat"], gpx["start_lon"])
-                st.session_state.pois = pois
-            if st.session_state.pois is not None:
-                if st.session_state.pois:
-                    st.table({
-                        "Name": [p["name"] for p in st.session_state.pois],
-                        "Typ": [p["typ"] for p in st.session_state.pois],
-                        "Adresse": [f"{p['strasse']}, {p['ort']}" for p in st.session_state.pois],
-                        "Entfernung": [f"{p['dist_m']} m" for p in st.session_state.pois],
-                    })
+    # ── Resupply-Stopps ──────────────────────────────────────────────────────
+    # Berechne ob überhaupt Stopps nötig sind
+    braucht_wasser = e["wasserflaschen"]["auffuellungen"] > 0
+    max_riegel = profil.get("max_riegel_anzahl", 0)
+    aktive_riegel = [r for r in profil["riegel"] if r["aktiv"]]
+    avg_carbs = (sum(r["carbs_g"] for r in aktive_riegel) / len(aktive_riegel)) if aktive_riegel else 0
+    kapazitaet_g = max_riegel * avg_carbs if max_riegel > 0 else float("inf")
+    braucht_carbs = (max_riegel > 0 and aktive_riegel and
+                     e["carbs"]["aus_riegeln"] > kapazitaet_g)
+
+    if braucht_wasser or braucht_carbs:
+        with st.expander("📍 Resupply-Stopps entlang der Route", expanded=True):
+            # Kurze Zusammenfassung was gebraucht wird
+            summary_parts = []
+            if braucht_wasser:
+                summary_parts.append(f"**{e['wasserflaschen']['auffuellungen']}× Wasser** (~{e['wasserflaschen']['refill_ml']} ml)")
+            if braucht_carbs:
+                fehlende_g = round(e["carbs"]["aus_riegeln"] - kapazitaet_g)
+                summary_parts.append(f"**Carb-Nachschub** (~{fehlende_g} g fehlen bei max {max_riegel} Riegeln)")
+            st.info("Unterwegs benötigt: " + " | ".join(summary_parts))
+
+            if not gpx:
+                st.warning("📌 Lade eine GPX-Datei hoch, um genaue Stopp-Positionen und Einkaufsmöglichkeiten entlang der Route zu sehen.")
+            else:
+                # Stopps berechnen
+                resupply = berechne_resupply_stopps(profil, e, gpx)
+
+                if not resupply:
+                    st.info("Keine Stopps notwendig (Kapazität reicht für die gesamte Strecke).")
                 else:
-                    st.info("Keine Einkaufsmöglichkeiten im Umkreis von 3 km gefunden.")
+                    st.caption(f"**{len(resupply)} Resupply-Stopp(s)** berechnet – "
+                               f"Suche im Umkreis von 1,5 km um den jeweiligen Routenpunkt (OpenStreetMap).")
+
+                    # Stopps anzeigen (ohne POIs)
+                    for i, s in enumerate(resupply):
+                        needs = []
+                        if s["braucht_wasser"]:
+                            needs.append("💧 Wasser")
+                        if s["braucht_carbs"]:
+                            needs.append("🍬 Carbs")
+                        st.markdown(f"**Stopp {i+1} – km {s['km']}** &nbsp;|&nbsp; {' + '.join(needs)}")
+                        cols = st.columns(4)
+                        cols[0].metric("Position", f"km {s['km']}")
+                        cols[1].metric("Koordinaten", f"{s['lat']:.4f}°N\n{s['lon']:.4f}°O")
+                        if s["braucht_wasser"]:
+                            cols[2].metric("Wasser-Reserve", f"~{s['wasser_rest_ml']} ml",
+                                           help="Noch im Tank bei Ankunft am Stopp (~18% Reserve)")
+                            cols[3].metric("Auffüllen", f"~{s['wasser_refill_ml']} ml")
+                        if s["braucht_carbs"]:
+                            cols2 = st.columns(2)
+                            cols2[0].metric("Carb-Reserve", f"~{s['carbs_rest_g']} g",
+                                            help="Noch in Trikottaschen bei Ankunft (~20% Reserve)")
+                            einkauf = s.get("carbs_einkauf_g", 0)
+                            cols2[1].metric(
+                                "Einkauf nötig",
+                                f"~{einkauf} g Kohlenhydrate",
+                                help="z.B. Gummibären: 85 g Carbs / 100 g Packung | "
+                                     "Banane: ~25 g | Riegel: je nach Produkt"
+                            )
+                            # Umrechnungshilfe
+                            if einkauf > 0:
+                                bananen = round(einkauf / 25)
+                                gummi = round(einkauf / 0.85)
+                                st.caption(
+                                    f"💡 Entspricht z.B.: **{bananen} Banane(n)** oder "
+                                    f"**{gummi} g Gummibärchen** oder "
+                                    f"**{math.ceil(einkauf/35)} Müsliriegel** (à ~35 g Carbs)"
+                                )
+                        st.divider()
+
+                    # POI-Suche an den Stopp-Punkten
+                    if st.button("🔍 Einkaufsmöglichkeiten an allen Stopps suchen", use_container_width=True):
+                        with st.spinner(f"Suche an {len(resupply)} Stopp(s) …"):
+                            for s in resupply:
+                                s["pois"] = suche_nahe_pois(s["lat"], s["lon"], radius_m=1500)
+                        st.session_state.resupply_stopps = resupply
+                        st.rerun()
+
+                    # POI-Ergebnisse anzeigen
+                    anzeige_stopps = st.session_state.resupply_stopps or []
+                    for i, s in enumerate(anzeige_stopps):
+                        pois = s.get("pois", [])
+                        st.markdown(f"**Stopp {i+1} (km {s['km']}) – Einkaufsmöglichkeiten:**")
+                        if pois:
+                            st.table({
+                                "Name": [p["name"] for p in pois],
+                                "Typ": [p["typ"] for p in pois],
+                                "Adresse": [
+                                    (p["strasse"] + (f", {p['ort']}" if p["ort"] else "")).strip(", ")
+                                    for p in pois
+                                ],
+                                "Entfernung von Route": [f"{p['dist_m']} m" for p in pois],
+                            })
+                        else:
+                            st.caption("Nichts im Umkreis von 1,5 km gefunden – ggf. Supermarkt im nächsten Ort suchen.")
 
     # ── Download ──
     st.divider()
