@@ -40,15 +40,14 @@ DEFAULT_PROFIL = {
         "kalibriert_ml_h": [[10, 250], [15, 300], [20, 350], [25, 450], [99, 600]],
     },
     "flaschen": [{"name": "Trinkflasche", "volumen_ml": 950, "anzahl": 2}],
-    "max_riegel_anzahl": 10,
     "softflask": {
         "volumen_ml": 450, "max_anzahl": 4, "gel_anteil_pct": 70,
         "malto_ratio": 2, "fructose_ratio": 1,
         "salz_normal_g": 0.7, "salz_heiss_g": 1.0, "temp_heiss_grad": 25,
     },
     "riegel": [
-        {"name": "Mango Fruchtriegel", "carbs_g": 30, "zucker_g": 18, "gewicht_g": 40, "aktiv": True},
-        {"name": "Hafer-Heidelbeere",  "carbs_g": 40, "zucker_g": 12, "gewicht_g": 50, "aktiv": True},
+        {"name": "Mango Fruchtriegel", "carbs_g": 30, "zucker_g": 18, "gewicht_g": 40, "anzahl": 3, "aktiv": True},
+        {"name": "Hafer-Heidelbeere",  "carbs_g": 40, "zucker_g": 12, "gewicht_g": 50, "anzahl": 2, "aktiv": True},
     ],
     "elektrolyte": {
         "name": "Raab Elektrolyt-Pulver",
@@ -170,15 +169,18 @@ def berechne_koffein(profil, dauer_h):
     else:             return {"caps": 5, "plan": f"Stunde 1, 4, 7, 9 (Doppel), 11"}
 
 def berechne_riegel_plan(profil, carbs_aus_riegeln, dauer_h, zone):
-    aktive = [r for r in profil["riegel"] if r["aktiv"]]
-    if not aktive or carbs_aus_riegeln <= 0:
+    aktive = [r for r in profil["riegel"] if r["aktiv"] and r.get("anzahl", 0) > 0]
+    if not aktive:
         return []
-    carbs_pro_runde = sum(r["carbs_g"] for r in aktive)
-    runden = math.ceil(carbs_aus_riegeln / carbs_pro_runde) if carbs_pro_runde > 0 else 1
     return [
-        {"name": r["name"], "anzahl": runden,
-         "carbs_g_pro_stueck": r["carbs_g"], "carbs_gesamt": runden * r["carbs_g"],
-         "zucker_g_pro_stueck": r.get("zucker_g", 0), "zucker_gesamt": runden * r.get("zucker_g", 0)}
+        {
+            "name": r["name"],
+            "anzahl": r.get("anzahl", 1),
+            "carbs_g_pro_stueck": r["carbs_g"],
+            "carbs_gesamt": r.get("anzahl", 1) * r["carbs_g"],
+            "zucker_g_pro_stueck": r.get("zucker_g", 0),
+            "zucker_gesamt": r.get("anzahl", 1) * r.get("zucker_g", 0),
+        }
         for r in aktive
     ]
 
@@ -424,13 +426,13 @@ def berechne_resupply_stopps(profil, plan, route):
 
     # ── Carb-Stopps ──────────────────────────────────────────────────────────
     carb_stopps = []
-    max_riegel = profil.get("max_riegel_anzahl", 0)
-    aktive_riegel = [r for r in profil["riegel"] if r["aktiv"]]
+    aktive_riegel = [r for r in profil["riegel"] if r["aktiv"] and r.get("anzahl", 0) > 0]
     carbs_aus_riegeln = plan["carbs"]["aus_riegeln"]
+    kapazitaet_g = sum(r["carbs_g"] * r.get("anzahl", 0) for r in aktive_riegel)
+    total_anzahl_r = sum(r.get("anzahl", 0) for r in aktive_riegel)
+    avg_carbs = kapazitaet_g / total_anzahl_r if total_anzahl_r > 0 else 35
 
-    if max_riegel > 0 and aktive_riegel and carbs_aus_riegeln > 0:
-        avg_carbs = sum(r["carbs_g"] for r in aktive_riegel) / len(aktive_riegel)
-        kapazitaet_g = max_riegel * avg_carbs
+    if aktive_riegel and carbs_aus_riegeln > 0 and kapazitaet_g > 0:
         carbs_pro_km = carbs_aus_riegeln / distanz_km
         CARB_BUFFER = 0.80
 
@@ -698,23 +700,34 @@ with st.sidebar:
 
     # ── Riegel & Snacks ──
     st.subheader("🍫 Riegel & Snacks")
-    st.caption("Trage hier deine mitgenommenen Riegel mit Nährwerten ein. "
-               "Deaktivierte Riegel werden nicht eingeplant.")
+    st.caption(
+        "Trage hier ein, welche Riegel du dabei hast und wie viele Stück du davon mitimmst. "
+        "Aus der Gesamtmenge berechnet der Planner, ob du unterwegs Nachschub kaufen musst."
+    )
     riegel_zu_loeschen = None
     for i, r in enumerate(profil["riegel"]):
-        with st.expander(f"{'✅' if r['aktiv'] else '❌'} {r['name']}", expanded=False):
+        anz = r.get("anzahl", 1)
+        label = f"{'✅' if r['aktiv'] else '❌'} {r['name']}  ×{anz}" if r["aktiv"] else f"❌ {r['name']} (inaktiv)"
+        with st.expander(label, expanded=False):
             r["aktiv"] = st.checkbox("Aktiv (einplanen)", value=r["aktiv"], key=f"r_aktiv_{i}")
             r["name"] = st.text_input("Name", value=r["name"], key=f"r_name_{i}")
-            cols = st.columns(2)
-            r["carbs_g"] = cols[0].number_input(
-                "Kohlenhydrate (g)", 0, 150, r["carbs_g"], key=f"r_carbs_{i}",
-                help="Kohlenhydrate pro Riegel laut Nährwerttabelle auf der Verpackung"
+            cols = st.columns(3)
+            r["anzahl"] = cols[0].number_input(
+                "Anzahl (Stück)", min_value=0, max_value=50,
+                value=int(r.get("anzahl", 1)), step=1, key=f"r_anz_{i}",
+                help="Wie viele Stück dieses Riegels nimmst du mit?"
             )
-            r["zucker_g"] = cols[1].number_input(
-                "davon Zucker (g)", 0, 150, r.get("zucker_g", 0), key=f"r_zucker_{i}",
-                help="Zuckeranteil aus der Nährwerttabelle (steht unter 'davon Zucker')"
+            r["carbs_g"] = cols[1].number_input(
+                "Carbs/Stk (g)", 0, 150, r["carbs_g"], key=f"r_carbs_{i}",
+                help="Kohlenhydrate pro Riegel laut Nährwerttabelle"
             )
-            if st.button(f"🗑️ Entfernen", key=f"r_del_{i}"):
+            r["zucker_g"] = cols[2].number_input(
+                "Zucker/Stk (g)", 0, 150, r.get("zucker_g", 0), key=f"r_zucker_{i}",
+                help="Zuckeranteil (steht unter 'davon Zucker')"
+            )
+            if r["aktiv"] and r.get("anzahl", 0) > 0:
+                st.caption(f"→ {r['anzahl']} × {r['carbs_g']} g = **{r['anzahl'] * r['carbs_g']} g Carbs** mitgenommen")
+            if st.button("🗑️ Entfernen", key=f"r_del_{i}"):
                 riegel_zu_loeschen = i
 
     if riegel_zu_loeschen is not None:
@@ -724,19 +737,16 @@ with st.sidebar:
     if st.button("➕ Riegel / Snack hinzufügen", use_container_width=True):
         profil["riegel"].append({
             "name": f"Neuer Riegel {len(profil['riegel'])+1}",
-            "carbs_g": 35, "zucker_g": 10, "gewicht_g": 45, "aktiv": True,
+            "carbs_g": 35, "zucker_g": 10, "gewicht_g": 45, "anzahl": 2, "aktiv": True,
         })
         st.rerun()
 
-    profil["max_riegel_anzahl"] = st.number_input(
-        "Max. Riegel/Snacks mitnehmbar (Stück gesamt)",
-        min_value=0, max_value=50,
-        value=int(profil.get("max_riegel_anzahl", 10)),
-        step=1,
-        help="Wie viele Riegel kannst du insgesamt in Trikottaschen und Rahmentasche verstauen? "
-             "Das bestimmt, wann du unterwegs Nachschub kaufen musst. "
-             "0 = keine Begrenzung (kein Carb-Resupply wird berechnet)."
-    )
+    # Zusammenfassung aller aktiven Riegel
+    aktive_r = [r for r in profil["riegel"] if r["aktiv"] and r.get("anzahl", 0) > 0]
+    if aktive_r:
+        total_stueck = sum(r.get("anzahl", 0) for r in aktive_r)
+        total_carbs_r = sum(r.get("anzahl", 0) * r["carbs_g"] for r in aktive_r)
+        st.caption(f"📦 Mitgenommen gesamt: **{total_stueck} Stück** → **{total_carbs_r} g Carbs** aus Riegeln")
 
     st.divider()
 
@@ -1269,12 +1279,25 @@ if st.session_state.ergebnis:
         with st.expander("🍫 Riegelplan", expanded=True):
             st.table({
                 "Riegel": [r["name"] for r in e["riegel"]],
-                "Stück": [r["anzahl"] for r in e["riegel"]],
+                "Mitgenommen": [f"{r['anzahl']} Stk" for r in e["riegel"]],
                 "Carbs/Stk (g)": [r["carbs_g_pro_stueck"] for r in e["riegel"]],
                 "Zucker/Stk (g)": [r["zucker_g_pro_stueck"] for r in e["riegel"]],
                 "Carbs ges. (g)": [r["carbs_gesamt"] for r in e["riegel"]],
                 "Zucker ges. (g)": [r["zucker_gesamt"] for r in e["riegel"]],
             })
+            total_mitgebracht_g = sum(r["carbs_gesamt"] for r in e["riegel"])
+            bedarf_g = e["carbs"]["aus_riegeln"]
+            differenz = total_mitgebracht_g - bedarf_g
+            if differenz >= 0:
+                st.success(
+                    f"✅ Mitgebrachte Riegel liefern **{total_mitgebracht_g} g Carbs** – "
+                    f"Bedarf {bedarf_g} g gedeckt (+{differenz} g Reserve)"
+                )
+            else:
+                st.warning(
+                    f"⚠️ Mitgebrachte Riegel liefern nur **{total_mitgebracht_g} g Carbs** – "
+                    f"Bedarf {bedarf_g} g → **{abs(differenz)} g fehlen** (Resupply nötig)"
+                )
     else:
         st.info("ℹ️ Keine Riegel eingeplant – entweder keine aktiv oder Carbs vollständig aus Gels.")
 
@@ -1362,12 +1385,10 @@ if st.session_state.ergebnis:
     # ── Resupply-Stopps ──────────────────────────────────────────────────────
     # Berechne ob überhaupt Stopps nötig sind
     braucht_wasser = e["wasserflaschen"]["auffuellungen"] > 0
-    max_riegel = profil.get("max_riegel_anzahl", 0)
-    aktive_riegel = [r for r in profil["riegel"] if r["aktiv"]]
-    avg_carbs = (sum(r["carbs_g"] for r in aktive_riegel) / len(aktive_riegel)) if aktive_riegel else 0
-    kapazitaet_g = max_riegel * avg_carbs if max_riegel > 0 else float("inf")
-    braucht_carbs = (max_riegel > 0 and aktive_riegel and
-                     e["carbs"]["aus_riegeln"] > kapazitaet_g)
+    _aktive_r = [r for r in profil["riegel"] if r["aktiv"] and r.get("anzahl", 0) > 0]
+    _kapazitaet_g = sum(r["carbs_g"] * r.get("anzahl", 0) for r in _aktive_r)
+    braucht_carbs = (_kapazitaet_g > 0 and _aktive_r and
+                     e["carbs"]["aus_riegeln"] > _kapazitaet_g)
 
     if braucht_wasser or braucht_carbs:
         with st.expander("📍 Resupply-Stopps entlang der Route", expanded=True):
@@ -1376,8 +1397,8 @@ if st.session_state.ergebnis:
             if braucht_wasser:
                 summary_parts.append(f"**{e['wasserflaschen']['auffuellungen']}× Wasser** (~{e['wasserflaschen']['refill_ml']} ml)")
             if braucht_carbs:
-                fehlende_g = round(e["carbs"]["aus_riegeln"] - kapazitaet_g)
-                summary_parts.append(f"**Carb-Nachschub** (~{fehlende_g} g fehlen bei max {max_riegel} Riegeln)")
+                fehlende_g = round(e["carbs"]["aus_riegeln"] - _kapazitaet_g)
+                summary_parts.append(f"**Carb-Nachschub** (~{fehlende_g} g fehlen)")
             st.info("Unterwegs benötigt: " + " | ".join(summary_parts))
 
             if not gpx:
