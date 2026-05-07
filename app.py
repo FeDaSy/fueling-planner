@@ -41,7 +41,10 @@ DEFAULT_PROFIL = {
     },
     "flaschen": [{"name": "Trinkflasche", "volumen_ml": 950, "anzahl": 2}],
     "softflask": {
-        "volumen_ml": 450, "max_anzahl": 4, "gel_anteil_pct": 70,
+        "flaschen": [
+            {"name": "Softflask 450ml", "volumen_ml": 450, "anzahl": 2},
+        ],
+        "gel_anteil_pct": 70,
         "malto_ratio": 2, "fructose_ratio": 1,
         "salz_normal_g": 0.7, "salz_heiss_g": 1.0, "temp_heiss_grad": 25,
     },
@@ -208,11 +211,25 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
     gel_anteil = sf["gel_anteil_pct"] / 100
     carbs_aus_gels = round(carbs_gesamt * gel_anteil)
     carbs_aus_riegeln = carbs_gesamt - carbs_aus_gels
-    anzahl_flasks = min(sf["max_anzahl"], max(1,
-        1 if carbs_gesamt <= 70 else 2 if carbs_gesamt <= 200 else
-        3 if carbs_gesamt <= 400 else sf["max_anzahl"]))
-    carbs_pro_flask = round(carbs_aus_gels / anzahl_flasks)
-    wasser_aus_gels = anzahl_flasks * round(sf["volumen_ml"] * 0.69)
+    # Softflask-Pool: alle mitgenommenen Flaschen zusammenrechnen
+    aktive_sf = [f for f in sf.get("flaschen", []) if f.get("anzahl", 0) > 0]
+    anzahl_flasks = sum(f["anzahl"] for f in aktive_sf)
+    total_vol_sf = sum(f["volumen_ml"] * f["anzahl"] for f in aktive_sf)
+    wasser_aus_gels = round(total_vol_sf * 0.69) if total_vol_sf > 0 else 0
+    # Rezept pro Flask-Typ proportional zum Volumen befüllen
+    sf_detail = []
+    if anzahl_flasks > 0 and total_vol_sf > 0 and carbs_aus_gels > 0:
+        carb_dichte = carbs_aus_gels / total_vol_sf
+        for f in aktive_sf:
+            cpf = max(1, round(carb_dichte * f["volumen_ml"]))
+            sf_detail.append({
+                "name": f.get("name", f"Softflask {f['volumen_ml']}ml"),
+                "volumen_ml": f["volumen_ml"],
+                "anzahl": f["anzahl"],
+                "carbs_pro_flask": cpf,
+                "rezept": berechne_gel_rezept(profil, cpf, temp, carbs_pro_h),
+            })
+    carbs_pro_flask = round(carbs_aus_gels / anzahl_flasks) if anzahl_flasks > 0 else 0
     flaschen_kapazitaet_ml = sum(f["volumen_ml"] * f["anzahl"] for f in profil["flaschen"])
     refill_ml = max(f["volumen_ml"] for f in profil["flaschen"]) if profil["flaschen"] else 950
     wasser_zusaetzlich = max(0, wasser_gesamt - wasser_aus_gels)
@@ -240,9 +257,14 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
         "wasser": {"pro_h": wasser_pro_h, "gesamt": wasser_gesamt, "aus_gels": wasser_aus_gels,
                    "zusaetzlich": wasser_zusaetzlich, "flaschen_kapazitaet_ml": flaschen_kapazitaet_ml,
                    "refill_ml": refill_ml},
-        "softflasks": {"anzahl": anzahl_flasks, "carbs_pro_flask": carbs_pro_flask,
-                       "rezept": berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h),
-                       "ratio_info": empfehle_glukose_fructose(carbs_pro_h)},
+        "softflasks": {
+            "anzahl": anzahl_flasks,
+            "carbs_pro_flask": carbs_pro_flask,
+            "gesamt_volumen_ml": total_vol_sf,
+            "flaschen": sf_detail,
+            "rezept": sf_detail[0]["rezept"] if sf_detail else {},
+            "ratio_info": empfehle_glukose_fructose(carbs_pro_h),
+        },
         "riegel": riegel_plan,
         "wasserflaschen": {"konfiguration": profil["flaschen"], "kapazitaet_ml": flaschen_kapazitaet_ml,
                            "auffuellungen": auffuellungen_noetig, "refill_ml": refill_ml},
@@ -756,6 +778,93 @@ with st.sidebar:
     if c2.button("➖ Letzte entfernen", use_container_width=True) and len(profil["flaschen"]) > 1:
         profil["flaschen"].pop()
         st.rerun()
+
+    st.divider()
+
+    # ── Softflasks / Energiegels ──
+    st.subheader("🧴 Softflasks / Energiegels")
+    st.caption(
+        "Gib an, welche Softflasks du dabei hast und wie viele Stück von jeder Größe. "
+        "Das Gel-Rezept wird automatisch proportional zum Volumen berechnet."
+    )
+    sf = profil["softflask"]
+    # Migration: altes Format ohne Flaschen-Liste
+    if "flaschen" not in sf:
+        sf["flaschen"] = [{"name": "Softflask", "volumen_ml": sf.pop("volumen_ml", 450),
+                           "anzahl": sf.pop("max_anzahl", 2)}]
+
+    sf_zu_loeschen = None
+    for i, f in enumerate(sf["flaschen"]):
+        label = f"{f.get('name', 'Softflask')}  ({f.get('volumen_ml', 0)} ml × {f.get('anzahl', 0)})"
+        with st.expander(label, expanded=True):
+            f["name"] = st.text_input("Bezeichnung", value=f.get("name", "Softflask"),
+                                      key=f"sf_name_{i}")
+            cols = st.columns(2)
+            f["anzahl"] = cols[0].number_input(
+                "Anzahl (Stück)", min_value=0, max_value=20,
+                value=int(f.get("anzahl", 1)), step=1, key=f"sf_anz_{i}",
+                help="Wie viele Softflasks dieser Größe nimmst du mit?"
+            )
+            f["volumen_ml"] = cols[1].number_input(
+                "Volumen (ml)", min_value=50, max_value=2000,
+                value=int(f.get("volumen_ml", 450)), step=50, key=f"sf_vol_{i}",
+                help="Fassungsvermögen der Softflask in ml"
+            )
+            if f.get("anzahl", 0) > 0:
+                st.caption(f"→ {f['anzahl']} × {f['volumen_ml']} ml = "
+                           f"**{f['anzahl'] * f['volumen_ml']} ml** Gel-Kapazität")
+            if st.button("🗑️ Entfernen", key=f"sf_del_{i}"):
+                sf_zu_loeschen = i
+
+    if sf_zu_loeschen is not None and len(sf["flaschen"]) > 1:
+        sf["flaschen"].pop(sf_zu_loeschen)
+        st.rerun()
+
+    c1, c2 = st.columns(2)
+    if c1.button("➕ Softflask hinzufügen", use_container_width=True):
+        sf["flaschen"].append({"name": f"Softflask {len(sf['flaschen'])+1}",
+                               "volumen_ml": 250, "anzahl": 1})
+        st.rerun()
+
+    # Zusammenfassung
+    _aktive_sf = [f for f in sf["flaschen"] if f.get("anzahl", 0) > 0]
+    if _aktive_sf:
+        _total_sf_vol = sum(f["volumen_ml"] * f["anzahl"] for f in _aktive_sf)
+        _total_sf_anz = sum(f["anzahl"] for f in _aktive_sf)
+        st.caption(f"📦 Gesamt: **{_total_sf_anz} Softflasks** · **{_total_sf_vol} ml** Gel-Kapazität")
+
+    # Gel-Rezept-Einstellungen
+    with st.expander("⚗️ Gel-Rezept Einstellungen", expanded=False):
+        sf["gel_anteil_pct"] = st.slider(
+            "Gel-Anteil der Carbs (%)", 0, 100, int(sf["gel_anteil_pct"]), step=5,
+            help="Wie viel Prozent der gesamten Kohlenhydrate aus den Softflasks kommen. "
+                 "Der Rest kommt aus Riegeln."
+        )
+        st.caption(
+            "Das Maltodextrin:Fructose-Verhältnis wird automatisch nach der Carb-Rate angepasst "
+            "(wissenschaftlich optimiert, z.B. 2:1 bei 60–80 g/h). "
+            "Hier manuell überschreiben falls gewünscht:"
+        )
+        cols = st.columns(2)
+        sf["malto_ratio"] = cols[0].number_input(
+            "Malto-Anteil", 1, 10, int(sf["malto_ratio"]), key="sf_malto",
+            help="Verhältnisteil Maltodextrin (Standard: 2)"
+        )
+        sf["fructose_ratio"] = cols[1].number_input(
+            "Fructose-Anteil", 0, 10, int(sf["fructose_ratio"]), key="sf_fructose",
+            help="Verhältnisteil Fructose (Standard: 1)"
+        )
+        cols2 = st.columns(3)
+        sf["salz_normal_g"] = cols2[0].number_input(
+            "Salz normal (g)", 0.0, 5.0, float(sf["salz_normal_g"]), step=0.1, key="sf_salz_n"
+        )
+        sf["salz_heiss_g"] = cols2[1].number_input(
+            "Salz Hitze (g)", 0.0, 5.0, float(sf["salz_heiss_g"]), step=0.1, key="sf_salz_h"
+        )
+        sf["temp_heiss_grad"] = cols2[2].number_input(
+            "Hitze ab (°C)", 10, 40, int(sf["temp_heiss_grad"]), key="sf_temp",
+            help="Ab dieser Temperatur mehr Salz ins Gel"
+        )
 
     st.divider()
 
@@ -1322,31 +1431,49 @@ if st.session_state.ergebnis:
 
     # ── Softflasks ──
     with st.expander("🧴 Softflasks / Gel-Mischung", expanded=True):
-        cols = st.columns(2)
-        cols[0].metric("Anzahl Softflasks", e["softflasks"]["anzahl"])
-        cols[1].metric("Kohlenhydrate pro Flask", f"{e['softflasks']['carbs_pro_flask']} g")
-        rez = e["softflasks"]["rezept"]
-        st.markdown("**Rezept pro Softflask (selbst mischen):**")
-        st.table({
-            "Zutat": ["Maltodextrin", "Fructose", "Salz", "Wasser auffüllen auf"],
-            "Menge": [
-                f"{rez['maltodextrin']} g",
-                f"{rez['fructose']} g",
-                f"{rez['salz']} g",
-                f"{rez['wasser']} ml",
-            ],
-        })
-        ratio_info = e["softflasks"].get("ratio_info")
+        sf_res = e["softflasks"]
+        cols = st.columns(3)
+        cols[0].metric("Softflasks gesamt", sf_res["anzahl"])
+        cols[1].metric("Gesamtvolumen", f"{sf_res.get('gesamt_volumen_ml', 0)} ml")
+        cols[2].metric("Ø Carbs pro Flask", f"{sf_res['carbs_pro_flask']} g")
+
+        ratio_info = sf_res.get("ratio_info")
         if ratio_info:
             r_m, r_f, r_txt = ratio_info
             ratio_display = ("Nur Maltodextrin (kein Fructose nötig)"
                              if r_f == 0 else f"{r_m}:{r_f} Maltodextrin:Fructose")
-            st.caption(
-                "Alle Zutaten in die Softflask geben, Wasser auffüllen, schütteln.\n\n"
-                f"💡 **Empfohlenes Verhältnis:** {ratio_display} – {r_txt}"
-            )
+            st.info(f"💡 **G:F-Verhältnis:** {ratio_display} – {r_txt}")
+
+        sf_flaschen = sf_res.get("flaschen", [])
+        # Prüfen ob alle Flaschen gleiche Größe → ein gemeinsames Rezept reicht
+        alle_gleich = (len(sf_flaschen) <= 1 or
+                       all(f["volumen_ml"] == sf_flaschen[0]["volumen_ml"] for f in sf_flaschen))
+
+        if alle_gleich and sf_flaschen:
+            f0 = sf_flaschen[0]
+            rez = f0["rezept"]
+            st.markdown(f"**Rezept pro Softflask ({f0['volumen_ml']} ml):**")
+            st.table({
+                "Zutat": ["Maltodextrin", "Fructose", "Salz", "Wasser auffüllen auf"],
+                "Menge": [f"{rez.get('maltodextrin',0)} g", f"{rez.get('fructose',0)} g",
+                          f"{rez.get('salz',0)} g", f"{rez.get('wasser',0)} ml"],
+            })
+        elif sf_flaschen:
+            st.markdown("**Rezept je Softflask-Typ (selbst mischen):**")
+            for fd in sf_flaschen:
+                rez = fd["rezept"]
+                st.markdown(
+                    f"_{fd['name']} · {fd['volumen_ml']} ml · {fd['anzahl']}× · "
+                    f"{fd['carbs_pro_flask']} g Carbs_"
+                )
+                st.table({
+                    "Zutat": ["Maltodextrin", "Fructose", "Salz", "Wasser auffüllen auf"],
+                    "Menge": [f"{rez.get('maltodextrin',0)} g", f"{rez.get('fructose',0)} g",
+                              f"{rez.get('salz',0)} g", f"{rez.get('wasser',0)} ml"],
+                })
         else:
-            st.caption("Alle Zutaten in die Softflask geben, Wasser auffüllen, schütteln.")
+            st.info("Keine Softflasks eingeplant – im Profil (links) Softflasks hinzufügen.")
+        st.caption("Alle Zutaten in die Softflask geben, Wasser auffüllen, schütteln.")
 
     # ── Riegel ──
     if e["riegel"]:
