@@ -296,6 +296,65 @@ def berechne_durchschnitts_wetter(wetter):
         "sum_regen": round(sum(wetter["niederschlag"]), 1), "sonne": sonne,
     }
 
+def hole_wetterdaten_fuer_route(gpx_route, lat_start, lon_start, datum_str,
+                                start_h, dauer_h, zone, distanz_km):
+    """
+    Holt Wetterdaten an mehreren Punkten entlang der Route.
+    Ab 80 km werden automatisch zusätzliche Messpunkte alle ~60 km gesetzt.
+    Die Uhrzeit je Punkt wird aus der geschätzten Ankunftszeit berechnet.
+    Gibt (merged_wetter_roh, punkte_info_liste) zurück.
+    """
+    GESCHW = {"Z1": 22, "Z2": 24, "Z3": 28, "Z4": 32, "Z5": 32, "Mix": 25}
+    speed = GESCHW.get(zone, 24)
+
+    # Messpunkte bestimmen
+    if gpx_route and distanz_km and distanz_km > 80:
+        anzahl = min(6, max(2, math.ceil(distanz_km / 60)))
+        # Gleichmäßige Verteilung, letzter Punkt bei 95% der Strecke
+        km_punkte = [round(distanz_km * i / (anzahl - 1), 1) for i in range(anzahl - 1)]
+        km_punkte.append(round(distanz_km * 0.95, 1))
+    else:
+        km_punkte = [0.0]
+
+    alle_roh = []
+    punkte_info = []
+
+    for km in km_punkte:
+        stunden_offset = km / speed
+        punkt_h = min(23, int(start_h + stunden_offset))
+
+        if km == 0 or not gpx_route:
+            plat, plon = lat_start, lon_start
+        else:
+            plat, plon = km_zu_gpx_koordinaten(gpx_route, km)
+
+        verbleibend = max(1.0, dauer_h - stunden_offset)
+        wetter = hole_wetterdaten(plat, plon, datum_str, punkt_h, min(2.0, verbleibend))
+
+        if wetter and wetter["temperaturen"]:
+            alle_roh.append(wetter)
+            punkte_info.append({
+                "km": km,
+                "lat": plat,
+                "lon": plon,
+                "uhrzeit": f"{punkt_h:02d}:00 Uhr",
+                "temp_avg": round(sum(wetter["temperaturen"]) / len(wetter["temperaturen"]), 1),
+                "regen_mm": round(sum(wetter["niederschlag"]), 1),
+            })
+
+    if not alle_roh:
+        return None, []
+
+    # Alle Messwerte zusammenführen (Gesamtdurchschnitt über Route + Zeitraum)
+    merged = {k: [] for k in ("stunden", "temperaturen", "luftfeuchte", "niederschlag", "wind", "wolken", "uv")}
+    for w in alle_roh:
+        for key in ("temperaturen", "luftfeuchte", "niederschlag", "wind", "wolken", "uv"):
+            merged[key].extend(w[key])
+    merged["stunden"] = alle_roh[0]["stunden"]
+
+    return merged, punkte_info
+
+
 def parse_gpx(gpx_bytes):
     try:
         root = ET.fromstring(gpx_bytes)
@@ -573,6 +632,8 @@ if "gpx_data" not in st.session_state:
     st.session_state.gpx_data = None
 if "resupply_stopps" not in st.session_state:
     st.session_state.resupply_stopps = None
+if "wetter_punkte" not in st.session_state:
+    st.session_state.wetter_punkte = []
 if "intensitaet_modus" not in st.session_state:
     st.session_state.intensitaet_modus = "Zone manuell wählen"
 if "intervalle" not in st.session_state:
@@ -1123,13 +1184,26 @@ if submitted:
     sonne = sonne_manuell
 
     if wetter_auto:
-        with st.spinner("🌤 Wetterdaten werden abgerufen …"):
-            wetter_roh = hole_wetterdaten(lat, lon, datum.strftime("%Y-%m-%d"), start_h, dauer_h)
+        _gpx = st.session_state.gpx_data
+        _distanz = float(distanz_km) if distanz_km else 0.0
+        _punkte_anzahl = (min(6, max(2, math.ceil(_distanz / 60)))
+                          if _gpx and _distanz > 80 else 1)
+        _spinner_text = (
+            f"🌤 Wetterdaten werden an {_punkte_anzahl} Punkten entlang der Route abgerufen …"
+            if _punkte_anzahl > 1 else "🌤 Wetterdaten werden abgerufen …"
+        )
+        with st.spinner(_spinner_text):
+            wetter_roh, wetter_punkte = hole_wetterdaten_fuer_route(
+                _gpx, lat, lon, datum.strftime("%Y-%m-%d"),
+                start_h, dauer_h, zone, _distanz,
+            )
             wetter_info = berechne_durchschnitts_wetter(wetter_roh)
         if wetter_info:
             temp = wetter_info["avg_temp"]
             sonne = wetter_info["sonne"]
+            st.session_state.wetter_punkte = wetter_punkte
         else:
+            st.session_state.wetter_punkte = []
             st.warning("⚠️ Wetterdaten konnten nicht abgerufen werden (kein Internet oder Datum zu weit in der Zukunft). Manuelle Temperatur wird verwendet.")
 
     # Mix-Modus: gewichtete Carbs und Wasser aus Intervallen berechnen
@@ -1367,6 +1441,26 @@ if st.session_state.ergebnis:
             cols[2].metric("Wind (Ø)", f"{w['avg_wind']} km/h")
             cols[3].metric("Regen", f"{w['sum_regen']} mm")
 
+            # Messpunkte entlang der Route anzeigen
+            _wpunkte = st.session_state.get("wetter_punkte", [])
+            if len(_wpunkte) > 1:
+                st.markdown(f"**Wettermessung an {len(_wpunkte)} Punkten entlang der Route:**")
+                st.table({
+                    "km": [f"{p['km']:.0f}" for p in _wpunkte],
+                    "Uhrzeit (gesch.)": [p["uhrzeit"] for p in _wpunkte],
+                    "Ø Temp. (°C)": [p["temp_avg"] for p in _wpunkte],
+                    "Regen (mm)": [p["regen_mm"] for p in _wpunkte],
+                    "Koordinaten": [f"{p['lat']:.4f}°N, {p['lon']:.4f}°O" for p in _wpunkte],
+                })
+                st.caption(
+                    "Die oben angezeigten Gesamtwerte (Ø Temp., Sonne, Wind, Regen) sind "
+                    "der Durchschnitt aller Messpunkte. Die Uhrzeiten sind Schätzwerte "
+                    "anhand der Streckenposition und der durchschnittlichen Fahrgeschwindigkeit."
+                )
+            elif _wpunkte:
+                st.caption(f"📍 Messpunkt: Start ({_wpunkte[0]['lat']:.4f}°N, {_wpunkte[0]['lon']:.4f}°O) – "
+                           "Für Mehrtages-Wettermessung eine GPX-Route mit >80 km hochladen.")
+
     # ── Hinweise ──
     hinweise = []
     if e["temp"] > 25:
@@ -1416,36 +1510,38 @@ if st.session_state.ergebnis:
                     # Stopps anzeigen (ohne POIs)
                     for i, s in enumerate(resupply):
                         needs = []
-                        if s["braucht_wasser"]:
-                            needs.append("💧 Wasser")
-                        if s["braucht_carbs"]:
-                            needs.append("🍬 Carbs")
+                        if s["braucht_wasser"]: needs.append("💧 Wasser")
+                        if s["braucht_carbs"]:  needs.append("🍬 Carbs")
+
                         st.markdown(f"**Stopp {i+1} – km {s['km']}** &nbsp;|&nbsp; {' + '.join(needs)}")
-                        cols = st.columns(4)
-                        cols[0].metric("Position", f"km {s['km']}")
-                        cols[1].metric("Koordinaten", f"{s['lat']:.4f}°N\n{s['lon']:.4f}°O")
+                        st.caption(
+                            f"📍 **{s['lat']:.5f}° N,  {s['lon']:.5f}° O** "
+                            f"&nbsp;· [In Google Maps öffnen]"
+                            f"(https://www.google.com/maps?q={s['lat']:.5f},{s['lon']:.5f})"
+                        )
+
+                        # Wasser-Zeile
                         if s["braucht_wasser"]:
-                            cols[2].metric("Wasser-Reserve", f"~{s['wasser_rest_ml']} ml",
-                                           help="Noch im Tank bei Ankunft am Stopp (~18% Reserve)")
-                            cols[3].metric("Auffüllen", f"~{s['wasser_refill_ml']} ml")
+                            wc = st.columns(3)
+                            wc[0].metric("Position", f"km {s['km']}")
+                            wc[1].metric("Wasser-Reserve bei Ankunft", f"~{s['wasser_rest_ml']} ml",
+                                         help="Noch im Tank (~18% Reserve)")
+                            wc[2].metric("Auffüllen", f"~{s['wasser_refill_ml']} ml")
+
+                        # Carb-Zeile
                         if s["braucht_carbs"]:
-                            cols2 = st.columns(2)
-                            cols2[0].metric("Carb-Reserve", f"~{s['carbs_rest_g']} g",
-                                            help="Noch in Trikottaschen bei Ankunft (~20% Reserve)")
                             einkauf = s.get("carbs_einkauf_g", 0)
-                            cols2[1].metric(
-                                "Einkauf nötig",
-                                f"~{einkauf} g Kohlenhydrate",
-                                help="z.B. Gummibären: 85 g Carbs / 100 g Packung | "
-                                     "Banane: ~25 g | Riegel: je nach Produkt"
-                            )
-                            # Umrechnungshilfe
+                            cc = st.columns(3)
+                            if not s["braucht_wasser"]:
+                                cc[0].metric("Position", f"km {s['km']}")
+                            cc[1].metric("Carb-Reserve bei Ankunft", f"~{s['carbs_rest_g']} g",
+                                         help="Noch in Trikottaschen (~20% Reserve)")
+                            cc[2].metric("Einkauf nötig", f"~{einkauf} g Carbs",
+                                         help="Gummibären: 85 g/100 g | Banane: ~25 g | Riegel: je nach Produkt")
                             if einkauf > 0:
-                                bananen = round(einkauf / 25)
-                                gummi = round(einkauf / 0.85)
                                 st.caption(
-                                    f"💡 Entspricht z.B.: **{bananen} Banane(n)** oder "
-                                    f"**{gummi} g Gummibärchen** oder "
+                                    f"💡 Entspricht z.B.: **{round(einkauf/25)} Banane(n)** oder "
+                                    f"**{round(einkauf/0.85):.0f} g Gummibärchen** oder "
                                     f"**{math.ceil(einkauf/35)} Müsliriegel** (à ~35 g Carbs)"
                                 )
                         st.divider()
