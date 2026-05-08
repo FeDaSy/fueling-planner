@@ -66,6 +66,15 @@ DEFAULT_PROFIL = {
 
 # ── Backend-Funktionen ────────────────────────────────────────────────────────
 
+def haversine_m(la1, lo1, la2, lo2):
+    """Abstand in Metern zwischen zwei GPS-Koordinaten (Haversine-Formel)."""
+    R = 6_371_000.0
+    p1, p2 = math.radians(la1), math.radians(la2)
+    dphi = math.radians(la2 - la1)
+    dlam = math.radians(lo2 - lo1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlam / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 def watts_zu_zone(watt, ftp):
     pct = watt / ftp
     for grenze, zone in POWER_ZONEN:
@@ -415,44 +424,111 @@ def parse_gpx(gpx_bytes):
     except Exception:
         return None
 
-def suche_nahe_pois(lat, lon, radius_m=1500):
-    def _haversine_m(la1, lo1, la2, lo2):
-        R = 6_371_000.0
-        p1, p2 = math.radians(la1), math.radians(la2)
-        dphi, dlam = math.radians(la2 - la1), math.radians(lo2 - lo1)
-        a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlam / 2) ** 2
-        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    query = (f"[out:json][timeout:12];("
-             f'node["amenity"="fuel"](around:{radius_m},{lat},{lon});'
-             f'node["amenity"="supermarket"](around:{radius_m},{lat},{lon});'
-             f'node["shop"="supermarket"](around:{radius_m},{lat},{lon});'
-             f'node["shop"="convenience"](around:{radius_m},{lat},{lon});'
-             f'node["shop"="grocery"](around:{radius_m},{lat},{lon});'
-             f'node["shop"="bakery"](around:{radius_m},{lat},{lon});'
-             f");out body;")
+def _overpass_pois_aus_elementen(els, ref_lat=None, ref_lon=None):
+    """Hilfsfunktion: wandelt Overpass-Elemente in POI-Dicts um."""
+    treffer = []
+    for el in els:
+        tags = el.get("tags", {})
+        roh = tags.get("amenity") or tags.get("shop", "")
+        poi = {
+            "name": tags.get("name", "Unbekannt"),
+            "typ": POI_TYP_NAMEN.get(roh, roh.capitalize()),
+            "strasse": (tags.get("addr:street", "") + " " + tags.get("addr:housenumber", "")).strip(),
+            "ort": tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village", ""),
+            "lat": el["lat"], "lon": el["lon"],
+            "dist_m": round(haversine_m(ref_lat, ref_lon, el["lat"], el["lon"])) if ref_lat else 0,
+        }
+        treffer.append(poi)
+    return treffer
+
+def _overpass_request(query, timeout=20):
+    """Sendet eine Overpass-Anfrage und gibt die Elemente zurück."""
     try:
-        d = urllib.parse.urlencode({"data": query}).encode()
+        data = urllib.parse.urlencode({"data": query}).encode()
         req = urllib.request.Request(
-            "https://overpass-api.de/api/interpreter", data=d, method="POST",
+            "https://overpass-api.de/api/interpreter", data=data, method="POST",
             headers={"User-Agent": "FuelingPlanner/2.0 (cycling nutrition)"},
         )
-        with urllib.request.urlopen(req, timeout=14) as resp:
-            els = json.loads(resp.read().decode()).get("elements", [])
-        treffer = []
-        for el in els:
-            tags = el.get("tags", {})
-            roh = tags.get("amenity") or tags.get("shop", "")
-            treffer.append({
-                "name": tags.get("name", "Unbekannt"),
-                "typ": POI_TYP_NAMEN.get(roh, roh.capitalize()),
-                "strasse": (tags.get("addr:street", "") + " " + tags.get("addr:housenumber", "")).strip(),
-                "ort": tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village", ""),
-                "dist_m": round(_haversine_m(lat, lon, el["lat"], el["lon"])),
-            })
-        treffer.sort(key=lambda x: x["dist_m"])
-        return treffer[:3]
+        with urllib.request.urlopen(req, timeout=timeout + 4) as resp:
+            return json.loads(resp.read().decode()).get("elements", [])
     except Exception:
         return []
+
+_OVERPASS_TYPEN = [
+    '"amenity"="fuel"', '"amenity"="supermarket"',
+    '"shop"="supermarket"', '"shop"="convenience"',
+    '"shop"="grocery"', '"shop"="bakery"',
+]
+
+def suche_pois_entlang_route(route, km_spaetestens, radius_m=500, km_fenster=25):
+    """
+    Sucht Einkaufsmöglichkeiten in einem Fenster [km_spaetestens-km_fenster … km_spaetestens]
+    entlang der GPX-Route. Nutzt eine einzige Overpass-Polyline-Query (around:<r>,lat1,lon1,...).
+    Bevorzugt Stationen, die nah an der Route liegen (≤ radius_m) und möglichst weit
+    hinten auf der Strecke sind (lieber kurz vor dem Bedarf als zu weit vorher).
+    Gibt POIs mit 'route_km' (km-Position auf der Route) und 'dist_m' (Abstand zur Route) zurück.
+    """
+    kum = route["kumulative_distanzen"]
+    points = route["points"]
+    km_start = max(0.5, km_spaetestens - km_fenster)
+
+    # Routenpunkte im Suchfenster samplen – alle ~2 km für die Polyline-Query
+    sample = []
+    letztes = -99.0
+    for i, d in enumerate(kum):
+        if km_start <= d <= km_spaetestens and d - letztes >= 2.0:
+            lat, lon, _ = points[i]
+            sample.append((d, lat, lon))
+            letztes = d
+    if not sample:
+        # Fallback: nur den Endpunkt nutzen
+        idx = next((i for i, d in enumerate(kum) if d >= km_spaetestens), len(kum) - 1)
+        lat, lon, _ = points[idx]
+        sample = [(km_spaetestens, lat, lon)]
+
+    # Overpass Polyline-Query: around:<r>,lat1,lon1,lat2,lon2,...
+    coords = ",".join(f"{lat},{lon}" for _, lat, lon in sample)
+    parts = "\n".join(f"  node[{t}](around:{radius_m},{coords});" for t in _OVERPASS_TYPEN)
+    query = f"[out:json][timeout:25];\n(\n{parts}\n);\nout body;"
+
+    els = _overpass_request(query, timeout=25)
+    if not els:
+        return []
+
+    # Für jeden POI: nächster Routenpunkt im Fenster (+ etwas Puffer)
+    km_lo, km_hi = km_start - 2, km_spaetestens + 2
+    ergebnisse = []
+    seen = set()
+    for el in els:
+        osm_id = el.get("id")
+        if osm_id in seen:
+            continue
+        seen.add(osm_id)
+        tags = el.get("tags", {})
+        roh = tags.get("amenity") or tags.get("shop", "")
+
+        min_dist = float("inf")
+        best_km = 0.0
+        for i, d in enumerate(kum):
+            if km_lo <= d <= km_hi:
+                dist = haversine_m(el["lat"], el["lon"], points[i][0], points[i][1])
+                if dist < min_dist:
+                    min_dist = dist
+                    best_km = d
+
+        ergebnisse.append({
+            "name": tags.get("name", "Unbekannt"),
+            "typ": POI_TYP_NAMEN.get(roh, roh.capitalize()),
+            "strasse": (tags.get("addr:street", "") + " " + tags.get("addr:housenumber", "")).strip(),
+            "ort": tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village", ""),
+            "lat": el["lat"], "lon": el["lon"],
+            "dist_m": round(min_dist),
+            "route_km": round(best_km, 1),
+        })
+
+    # Sortierung: erst nach Routennähe (≤300 m bevorzugt), dann möglichst spät auf Route
+    ergebnisse.sort(key=lambda x: (x["dist_m"] > 300, -(x["route_km"])))
+    return ergebnisse[:6]
 
 def km_zu_gpx_koordinaten(route, ziel_km):
     """Gibt die Routenkoordinaten am nächsten GPX-Punkt zur gegebenen km-Position zurück."""
@@ -1674,30 +1750,37 @@ if st.session_state.ergebnis:
                         st.divider()
 
                     # POI-Suche an den Stopp-Punkten
-                    if st.button("🔍 Einkaufsmöglichkeiten an allen Stopps suchen", use_container_width=True):
-                        with st.spinner(f"Suche an {len(resupply)} Stopp(s) …"):
+                    if st.button("🔍 Beste Einkaufsmöglichkeiten entlang der Route suchen", use_container_width=True):
+                        with st.spinner(f"Suche im 25-km-Fenster vor jedem Stopp …"):
                             for s in resupply:
-                                s["pois"] = suche_nahe_pois(s["lat"], s["lon"], radius_m=1500)
+                                s["poi_ergebnisse"] = suche_pois_entlang_route(
+                                    gpx, s["km"], radius_m=500, km_fenster=25
+                                )
                         st.session_state.resupply_stopps = resupply
                         st.rerun()
 
                     # POI-Ergebnisse anzeigen
                     anzeige_stopps = st.session_state.resupply_stopps or []
                     for i, s in enumerate(anzeige_stopps):
-                        pois = s.get("pois", [])
-                        st.markdown(f"**Stopp {i+1} (km {s['km']}) – Einkaufsmöglichkeiten:**")
+                        pois = s.get("poi_ergebnisse", [])
+                        deadline_km = s["km"]
+                        st.markdown(f"**Stopp {i+1} – Deadline: km {deadline_km} | Einkaufsmöglichkeiten in den letzten 25 km:**")
                         if pois:
-                            st.table({
-                                "Name": [p["name"] for p in pois],
-                                "Typ": [p["typ"] for p in pois],
-                                "Adresse": [
-                                    (p["strasse"] + (f", {p['ort']}" if p["ort"] else "")).strip(", ")
-                                    for p in pois
-                                ],
-                                "Entfernung von Route": [f"{p['dist_m']} m" for p in pois],
-                            })
+                            empfehlung = pois[0]
+                            maps_base = "https://www.google.com/maps/search/?api=1&query="
+                            for rank, p in enumerate(pois):
+                                adresse = (p["strasse"] + (f", {p['ort']}" if p["ort"] else "")).strip(", ")
+                                maps_url = f"{maps_base}{p['lat']},{p['lon']}"
+                                dist_label = f"{p['dist_m']} m zur Route"
+                                km_label = f"km {p['route_km']}"
+                                badge = "⭐ **Empfehlung** – " if rank == 0 else ""
+                                st.markdown(
+                                    f"{badge}[{p['name']}]({maps_url}) · {p['typ']}"
+                                    + (f" · {adresse}" if adresse else "")
+                                    + f" | {km_label} | {dist_label}"
+                                )
                         else:
-                            st.caption("Nichts im Umkreis von 1,5 km gefunden – ggf. Supermarkt im nächsten Ort suchen.")
+                            st.caption("Keine Station im 25-km-Fenster vor diesem Stopp gefunden (Radius 500 m zur Route).")
 
     # ── Download ──
     st.divider()
