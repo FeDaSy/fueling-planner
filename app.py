@@ -814,56 +814,96 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
 def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None):
     try:
         from fpdf import FPDF
+        from fpdf.enums import XPos, YPos
     except ImportError:
         return b""
 
+    LM  = 10    # left margin mm
+    W   = 190   # usable width mm
+    LH  = 6.0   # standard line height
+
     sf_res = e.get("softflasks", {})
-    wf = e.get("wasserflaschen", {})
+    wf     = e.get("wasserflaschen", {})
     sonne_label = {"keine": "Bedeckt", "mittel": "Teils sonnig", "stark": "Vollsonne"}
 
     def _s(text):
         t = str(text)
-        for src, dst in [("–", "-"), ("—", "-"), ("’", "'"),
-                          ("“", '"'), ("”", '"'), ("≤", "<="),
-                          ("≥", ">="), ("→", "->"), ("×", "x")]:
+        for src, dst in [
+            ("–", "-"), ("—", "-"), ("'", "'"),
+            (""", '"'), (""", '"'), ("≤", "<="),
+            ("≥", ">="), ("→", "->"),
+        ]:
             t = t.replace(src, dst)
         return t.encode("latin-1", errors="replace").decode("latin-1")
 
+    def nl(pdf_obj):
+        """Move to next line at left margin."""
+        pdf_obj.set_x(LM)
+        pdf_obj.ln(LH)
+
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_margins(10, 10, 10)
+    pdf.set_margins(LM, LM, LM)
     pdf.add_page()
-    W = 190
 
+    # ── Helpers ────────────────────────────────────────────────────────────────
     def section(title):
-        pdf.ln(2)
+        pdf.ln(3)
+        pdf.set_x(LM)
         pdf.set_font("Helvetica", "B", 11)
         pdf.set_fill_color(210, 225, 245)
-        pdf.cell(W, 7, _s(title), ln=True, fill=True)
+        pdf.cell(W, 7, _s(title),
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
         pdf.set_font("Helvetica", "", 10)
         pdf.ln(1)
 
     def kv(label, value):
+        """Two-column key-value row. Always starts at left margin."""
+        pdf.set_x(LM)
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(58, 5.5, _s(label + ":"), ln=False)
+        pdf.cell(62, LH, _s(label + ":"),
+                 new_x=XPos.RIGHT, new_y=YPos.TOP)
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(W - 58, 5.5, _s(str(value)))
+        # multi_cell must land back at left margin after finishing
+        pdf.multi_cell(W - 62, LH, _s(str(value)),
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    def note(text):
+    def body(text, indent=0):
+        pdf.set_x(LM + indent)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(W - indent, LH, _s(text),
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def note(text, indent=8):
+        pdf.set_x(LM + indent)
         pdf.set_font("Helvetica", "I", 8.5)
         pdf.set_text_color(90, 90, 90)
-        pdf.cell(8)
-        pdf.multi_cell(W - 8, 4.5, _s(text))
+        pdf.multi_cell(W - indent, 4.5, _s(text),
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_text_color(0, 0, 0)
 
+    def table_row(vals, cws, font_style="", font_size=9, border=1):
+        pdf.set_x(LM)
+        pdf.set_font("Helvetica", font_style, font_size)
+        for i, (v, w) in enumerate(zip(vals, cws)):
+            last = (i == len(vals) - 1)
+            pdf.cell(w, 5.5, _s(str(v)), border=border, align="C",
+                     new_x=XPos.RIGHT if not last else XPos.LMARGIN,
+                     new_y=YPos.TOP  if not last else YPos.NEXT)
+
     # ── Titel ──────────────────────────────────────────────────────────────────
+    pdf.set_x(LM)
     pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(W, 11, "Cycling Fueling Plan", ln=True, align="C")
+    pdf.cell(W, 11, "Cycling Fueling Plan",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    pdf.set_x(LM)
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(W, 5.5, _s(f"Profil: {e['profil_name']}"), ln=True, align="C")
-    pdf.cell(W, 5.5,
+    pdf.cell(W, LH, _s(f"Profil: {e['profil_name']}"),
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    pdf.set_x(LM)
+    pdf.cell(W, LH,
              _s(f"Zone: {e['zone']}  |  Dauer: {e['dauer_h']} h  |  Temp: {e['temp']} °C"),
-             ln=True, align="C")
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
     pdf.ln(4)
 
     # ── Kohlenhydrate ──────────────────────────────────────────────────────────
@@ -872,7 +912,7 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     kv("Basis", f"{e['carbs']['basis']} g")
     if e["carbs"].get("hm_bonus"):
         kv("HM-Bonus", f"{e['carbs']['hm_bonus']} g")
-    kv("Aus Gels (Softflasks)", f"{e['carbs']['aus_gels']} g")
+    kv("Aus Gels", f"{e['carbs']['aus_gels']} g")
     kv("Aus Riegeln", f"{e['carbs']['aus_riegeln']} g")
     if sf_res.get("ratio_info"):
         kv("Glukose:Fructose", sf_res["ratio_info"][2])
@@ -891,15 +931,16 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     if sf_flaschen:
         for f in sf_flaschen:
             r = f.get("rezept", {})
+            pdf.set_x(LM)
             pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(0, 5.5, _s(f"{f['anzahl']}x {f['name']} ({f['volumen_ml']} ml)"), ln=True)
-            pdf.set_font("Helvetica", "", 10)
-            pdf.cell(8)
-            pdf.cell(0, 5, _s(
+            pdf.cell(0, LH, _s(f"{f['anzahl']}x {f['name']} ({f['volumen_ml']} ml)"),
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            body(
                 f"Carbs: {f['carbs_pro_flask']} g  |  Malto: {r.get('maltodextrin', 0)} g  |  "
                 f"Fructose: {r.get('fructose', 0)} g  |  Salz: {r.get('salz', 0)} g  |  "
-                f"Wasser: {r.get('wasser', 0)} ml"
-            ), ln=True)
+                f"Wasser: {r.get('wasser', 0)} ml",
+                indent=6,
+            )
     else:
         r0 = sf_res.get("rezept", {})
         kv("Anzahl", sf_res.get("anzahl", 0))
@@ -912,12 +953,11 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     if e.get("riegel"):
         section("Riegel")
         for r in e["riegel"]:
-            pdf.set_font("Helvetica", "", 10)
-            pdf.cell(8)
-            pdf.cell(0, 5.5, _s(
+            body(
                 f"{r['anzahl']}x  {r['name']}"
-                f"  (Carbs: {r['carbs_gesamt']} g, davon Zucker: {r['zucker_gesamt']} g)"
-            ), ln=True)
+                f"  (Carbs: {r['carbs_gesamt']} g, davon Zucker: {r['zucker_gesamt']} g)",
+                indent=4,
+            )
 
     # ── Elektrolyte & Koffein ──────────────────────────────────────────────────
     section("Elektrolyte")
@@ -936,27 +976,20 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     if mix_iv:
         section("Trainings-Intervalle (Mix)")
         total_min = sum(iv.get("dauer_min", 0) for iv in mix_iv)
-        cw = [22, 28, 28, 28, 34, 28, 22]
-        hdrs = ["Zone", "Dauer (min)", "Carbs/h", "Wasser/h", "Watt", "HF (bpm)", "Anteil"]
-        pdf.set_font("Helvetica", "B", 9)
-        for h, w in zip(hdrs, cw):
-            pdf.cell(w, 6, h, border=1, align="C")
-        pdf.ln()
-        pdf.set_font("Helvetica", "", 9)
+        cw  = [22, 30, 32, 30, 34, 26, 16]
+        hdr = ["Zone", "Dauer (min)", "Carbs/h", "Wasser/h", "Watt", "HF (bpm)", "Anteil"]
+        table_row(hdr, cw, font_style="B")
         for iv in mix_iv:
             anteil = f"{round(iv['dauer_min'] / total_min * 100)}%" if total_min else ""
-            vals = [
+            table_row([
                 iv.get("zone", ""),
                 str(iv.get("dauer_min", 0)),
                 f"{CARBS_PRO_STUNDE.get(iv.get('zone', 'Z2'), 60)} g/h",
                 "-",
                 str(iv["watt"]) if iv.get("watt") else "-",
-                str(iv["hf"]) if iv.get("hf") else "-",
+                str(iv["hf"])   if iv.get("hf")   else "-",
                 anteil,
-            ]
-            for v, w in zip(vals, cw):
-                pdf.cell(w, 5.5, _s(v), border=1, align="C")
-            pdf.ln()
+            ], cw)
 
     # ── Wetter ─────────────────────────────────────────────────────────────────
     if wetter_info:
@@ -966,32 +999,27 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
             f"(min {wetter_info['min_temp']} / max {wetter_info['max_temp']})"
         ))
         kv("Sonne", sonne_label.get(wetter_info.get("sonne", ""), wetter_info.get("sonne", "-")))
-        kv("Wind", f"{wetter_info['avg_wind']} km/h")
+        kv("Wind",  f"{wetter_info['avg_wind']} km/h")
         kv("Regen", f"{wetter_info['sum_regen']} mm")
 
         if wetter_punkte and len(wetter_punkte) > 1:
             pdf.ln(2)
+            pdf.set_x(LM)
             pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(0, 5.5, "Wetterverlauf entlang der Route:", ln=True)
-            cw2 = [22, 30, 52, 32, 30, 24]
-            h2 = ["km", "Uhrzeit", "Koordinaten", "Temp (°C)", "Wind", "Regen (mm)"]
-            pdf.set_font("Helvetica", "B", 9)
-            for h, w in zip(h2, cw2):
-                pdf.cell(w, 6, _s(h), border=1, align="C")
-            pdf.ln()
-            pdf.set_font("Helvetica", "", 9)
+            pdf.cell(0, LH, "Wetterverlauf entlang der Route:",
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            cw2 = [20, 28, 54, 32, 28, 28]
+            table_row(["km", "Uhrzeit", "Koordinaten", "Temp (°C)", "Wind", "Regen (mm)"],
+                      cw2, font_style="B")
             for pt in wetter_punkte:
-                vals = [
+                table_row([
                     str(pt.get("km", "")),
                     pt.get("uhrzeit", ""),
-                    f"{pt.get('lat', ''):.4f}, {pt.get('lon', ''):.4f}",
+                    f"{pt.get('lat', 0.0):.4f}, {pt.get('lon', 0.0):.4f}",
                     f"{pt.get('temp_avg', '')} °C",
                     "-",
                     f"{pt.get('regen_mm', '')} mm",
-                ]
-                for v, w in zip(vals, cw2):
-                    pdf.cell(w, 5.5, _s(str(v)), border=1, align="C")
-                pdf.ln()
+                ], cw2)
 
     # ── Resupply-Stopps ────────────────────────────────────────────────────────
     if resupply_stopps:
@@ -1000,53 +1028,52 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
             needs = []
             if stopp.get("braucht_wasser"): needs.append("Wasser")
             if stopp.get("braucht_carbs"):  needs.append("Carbs")
+            pdf.set_x(LM)
             pdf.set_font("Helvetica", "B", 10)
-            pdf.set_fill_color(245, 245, 245)
-            pdf.cell(W, 6,
-                     _s(f"Stopp {i + 1}  –  km {stopp.get('km', '?')}  [{' + '.join(needs)}]"),
-                     ln=True, fill=True)
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_fill_color(240, 240, 248)
+            pdf.cell(W, 6.5,
+                     _s(f"Stopp {i + 1}  |  km {stopp.get('km', '?')}  [{' + '.join(needs)}]"),
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
             if stopp.get("lat"):
                 note(f"Position: {stopp['lat']:.5f}° N,  {stopp['lon']:.5f}° O")
             if stopp.get("braucht_wasser"):
-                pdf.cell(8)
-                pdf.cell(0, 5, _s(f"Wasser auffüllen: ~{stopp.get('wasser_refill_ml', '?')} ml"), ln=True)
+                body(f"Wasser auffüllen: ~{stopp.get('wasser_refill_ml', '?')} ml", indent=6)
             if stopp.get("braucht_carbs"):
                 einkauf = stopp.get("carbs_einkauf_g", 0)
-                pdf.cell(8)
-                pdf.cell(0, 5, _s(f"Carbs kaufen: ~{einkauf} g"), ln=True)
+                body(f"Carbs kaufen: ~{einkauf} g", indent=6)
                 if einkauf:
                     note(
                         f"z.B. {math.ceil(einkauf / 35)} Riegel (a 35 g)  |  "
                         f"{round(einkauf / 25)} Bananen  |  "
-                        f"{round(einkauf / 0.85):.0f} g Gummibaerchen"
+                        f"{round(einkauf / 0.85):.0f} g Gummibaerchen",
+                        indent=12,
                     )
             pois = stopp.get("poi_ergebnisse", [])
             if pois:
+                pdf.set_x(LM + 6)
                 pdf.set_font("Helvetica", "B", 9)
-                pdf.cell(8)
-                pdf.cell(0, 5, "Empfohlene Einkaufsstationen:", ln=True)
-                pdf.set_font("Helvetica", "", 9)
+                pdf.cell(0, 5, "Empfohlene Einkaufsstationen:",
+                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                 for rank, p in enumerate(pois[:4]):
                     adresse = (
                         p.get("strasse", "") + (f", {p['ort']}" if p.get("ort") else "")
                     ).strip(", ")
                     marker = "* " if rank == 0 else "  "
-                    pdf.cell(14)
-                    pdf.cell(0, 5, _s(
+                    body(
                         f"{marker}{p['name']} ({p['typ']})"
-                        f"  –  km {p['route_km']}"
-                        f"  –  {p['dist_m']} m zur Route"
-                        + (f"  –  {adresse}" if adresse else "")
-                    ), ln=True)
+                        f"  |  km {p['route_km']}  |  {p['dist_m']} m zur Route"
+                        + (f"  |  {adresse}" if adresse else ""),
+                        indent=12,
+                    )
             pdf.ln(2)
 
     # ── Footer ─────────────────────────────────────────────────────────────────
+    pdf.set_x(LM)
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(160, 160, 160)
     pdf.cell(W, 5,
              _s(f"Erstellt mit Cycling Fueling Planner  |  {datetime.now().strftime('%d.%m.%Y %H:%M')}"),
-             ln=True, align="C")
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
 
     return bytes(pdf.output())
 
@@ -2126,8 +2153,15 @@ if st.session_state.ergebnis:
 
     # ── Download ──
     st.divider()
-    wp = st.session_state.get("wetter_punkte", [])
-    rs = st.session_state.get("resupply_stopps") or []
+    wp  = st.session_state.get("wetter_punkte", [])
+    rs  = st.session_state.get("resupply_stopps") or []
+    # Falls Stopps noch nicht berechnet: jetzt nachholen (braucht GPX)
+    _gpx_dl = st.session_state.get("gpx_data")
+    if not rs and _gpx_dl and (
+        e.get("wasserflaschen", {}).get("auffuellungen", 0) > 0
+        or e.get("carbs", {}).get("aus_riegeln", 0) > 0
+    ):
+        rs = berechne_resupply_stopps(profil, e, _gpx_dl)
     plan_text = erstelle_plan_text(e, w, wp, rs)
     pdf_bytes = erstelle_plan_pdf(e, w, wp, rs)
     dl_col1, dl_col2 = st.columns(2)
