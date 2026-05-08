@@ -441,7 +441,7 @@ def _overpass_pois_aus_elementen(els, ref_lat=None, ref_lon=None):
         treffer.append(poi)
     return treffer
 
-def _overpass_request(query, timeout=20):
+def _overpass_request(query, timeout=12):
     """Sendet eine Overpass-Anfrage und gibt die Elemente zurück."""
     try:
         data = urllib.parse.urlencode({"data": query}).encode()
@@ -449,7 +449,7 @@ def _overpass_request(query, timeout=20):
             "https://overpass-api.de/api/interpreter", data=data, method="POST",
             headers={"User-Agent": "FuelingPlanner/2.0 (cycling nutrition)"},
         )
-        with urllib.request.urlopen(req, timeout=timeout + 4) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode()).get("elements", [])
     except Exception:
         return []
@@ -489,9 +489,9 @@ def suche_pois_entlang_route(route, km_spaetestens, radius_m=500, km_fenster=25)
     # Overpass Polyline-Query: around:<r>,lat1,lon1,lat2,lon2,...
     coords = ",".join(f"{lat},{lon}" for _, lat, lon in sample)
     parts = "\n".join(f"  node[{t}](around:{radius_m},{coords});" for t in _OVERPASS_TYPEN)
-    query = f"[out:json][timeout:25];\n(\n{parts}\n);\nout body;"
+    query = f"[out:json][timeout:12];\n(\n{parts}\n);\nout body;"
 
-    els = _overpass_request(query, timeout=25)
+    els = _overpass_request(query, timeout=12)
     if not els:
         return []
 
@@ -1751,11 +1751,15 @@ if st.session_state.ergebnis:
 
                     # POI-Suche an den Stopp-Punkten
                     if st.button("🔍 Beste Einkaufsmöglichkeiten entlang der Route suchen", use_container_width=True):
-                        with st.spinner(f"Suche im 25-km-Fenster vor jedem Stopp …"):
-                            for s in resupply:
+                        with st.status("Suche Einkaufsmöglichkeiten …", expanded=True) as status:
+                            for idx, s in enumerate(resupply):
+                                status.update(label=f"Stopp {idx+1}/{len(resupply)}: suche im Fenster bis km {s['km']} …")
                                 s["poi_ergebnisse"] = suche_pois_entlang_route(
                                     gpx, s["km"], radius_m=500, km_fenster=25
                                 )
+                                gefunden = len(s["poi_ergebnisse"])
+                                st.write(f"✅ Stopp {idx+1} (km {s['km']}): {gefunden} Station(en) gefunden")
+                            status.update(label="Suche abgeschlossen", state="complete", expanded=False)
                         st.session_state.resupply_stopps = resupply
                         st.rerun()
 
