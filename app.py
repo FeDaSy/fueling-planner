@@ -659,58 +659,396 @@ def schaetze_dauer(distanz_km, hoehenmeter, zone="Z2"):
     v = {"Z1": 22, "Z2": 24, "Z3": 28, "Z4": 32, "Z5": 32, "Mix": 25}.get(zone, 24)
     return round(distanz_km / v + (hoehenmeter / 100) * (6 / 60), 1)
 
-def erstelle_plan_text(e, wetter_info=None):
+def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None):
+    sf_res = e.get("softflasks", {})
+    wf = e.get("wasserflaschen", {})
+    sonne_label = {"keine": "Bedeckt", "mittel": "Teils sonnig", "stark": "Vollsonne"}
+
     lines = [
-        "=== CYCLING FUELING PLAN ===",
-        f"Profil:  {e['profil_name']}",
-        f"Dauer:   {e['dauer_h']} h  |  Zone: {e['zone']}  |  Temp: {e['temp']} °C",
+        "=" * 62,
+        "  CYCLING FUELING PLAN",
+        "=" * 62,
+        f"Profil : {e['profil_name']}",
+        f"Zone   : {e['zone']}  |  Dauer: {e['dauer_h']} h  |  Temp: {e['temp']} °C",
         "",
         "--- KOHLENHYDRATE ---",
-        f"Gesamt:      {e['carbs']['gesamt']} g  ({e['carbs']['pro_h']} g/h via {e['carbs']['quelle']})",
-        f"Basis:       {e['carbs']['basis']} g",
-        f"HM-Bonus:    {e['carbs']['hm_bonus']} g",
-        f"Aus Gels:    {e['carbs']['aus_gels']} g",
-        f"Aus Riegeln: {e['carbs']['aus_riegeln']} g",
-        "",
-        "--- WASSER ---",
-        f"Gesamt:      {e['wasser']['gesamt']} ml  ({e['wasser']['pro_h']} ml/h)",
-        f"Aus Gels:    {e['wasser']['aus_gels']} ml",
-        f"Flaschen:    {e['wasser']['zusaetzlich']} ml zusätzlich",
-        "",
-        "--- SOFTFLASKS ---",
-        f"Anzahl:      {e['softflasks']['anzahl']}",
-        f"Carbs/Flask: {e['softflasks']['carbs_pro_flask']} g",
-        f"Rezept:      Malto {e['softflasks']['rezept']['maltodextrin']} g  |  "
-        f"Fructose {e['softflasks']['rezept']['fructose']} g  |  "
-        f"Salz {e['softflasks']['rezept']['salz']} g  |  "
-        f"Wasser {e['softflasks']['rezept']['wasser']} ml",
-        "",
+        f"Gesamt        : {e['carbs']['gesamt']} g  ({e['carbs']['pro_h']} g/h via {e['carbs']['quelle']})",
+        f"Basis         : {e['carbs']['basis']} g",
+        f"HM-Bonus      : {e['carbs']['hm_bonus']} g",
+        f"Aus Gels      : {e['carbs']['aus_gels']} g",
+        f"Aus Riegeln   : {e['carbs']['aus_riegeln']} g",
     ]
-    if e["riegel"]:
+    if sf_res.get("ratio_info"):
+        ri = sf_res["ratio_info"]
+        lines.append(f"Glukose:Frukt. : {ri.get('label', '')}")
+    lines.append("")
+
+    lines += [
+        "--- WASSER ---",
+        f"Gesamt        : {e['wasser']['gesamt']} ml  ({e['wasser']['pro_h']} ml/h)",
+        f"Aus Gels      : {e['wasser']['aus_gels']} ml",
+        f"Aus Flaschen  : {e['wasser']['zusaetzlich']} ml",
+    ]
+    if wf:
+        lines.append(f"Auffüllungen  : {wf.get('auffuellungen', 0)}x  (~{wf.get('refill_ml', 0)} ml/Mal)")
+    lines.append("")
+
+    lines.append("--- SOFTFLASKS ---")
+    sf_flaschen = sf_res.get("flaschen", [])
+    if sf_flaschen:
+        for f in sf_flaschen:
+            r = f.get("rezept", {})
+            lines.append(f"  {f['anzahl']}x {f['name']} ({f['volumen_ml']} ml):")
+            lines.append(
+                f"    Carbs {f['carbs_pro_flask']} g  |  Malto {r.get('maltodextrin', 0)} g  |  "
+                f"Fructose {r.get('fructose', 0)} g  |  Salz {r.get('salz', 0)} g  |  "
+                f"Wasser {r.get('wasser', 0)} ml"
+            )
+    else:
+        r0 = sf_res.get("rezept", {})
+        lines += [
+            f"Anzahl        : {sf_res.get('anzahl', 0)}",
+            f"Carbs/Flask   : {sf_res.get('carbs_pro_flask', 0)} g",
+            f"Rezept        : Malto {r0.get('maltodextrin', 0)} g  |  Fructose {r0.get('fructose', 0)} g  |  "
+            f"Salz {r0.get('salz', 0)} g  |  Wasser {r0.get('wasser', 0)} ml",
+        ]
+    lines.append("")
+
+    if e.get("riegel"):
         lines.append("--- RIEGEL ---")
         for r in e["riegel"]:
-            lines.append(f"  {r['name']}: {r['anzahl']}x  "
-                         f"(Carbs: {r['carbs_gesamt']} g | Zucker: {r['zucker_gesamt']} g)")
+            lines.append(
+                f"  {r['anzahl']}x  {r['name']}"
+                f"  (Carbs: {r['carbs_gesamt']} g, Zucker: {r['zucker_gesamt']} g)"
+            )
         lines.append("")
+
     el = e["elektrolyte"]
     lines += [
         "--- ELEKTROLYTE ---",
-        f"Produkt:  {el['name']}",
-        f"Portion:  {el['portion_g']} g  x{el['fuellungen']}  =  {el['gesamt_g']} g",
+        f"Produkt       : {el['name']}",
+        f"Menge         : {el['portion_g']} g x {el['fuellungen']}  =  {el['gesamt_g']} g",
         "",
         "--- KOFFEIN ---",
-        f"Plan:     {e['koffein']['plan']}  ({e['koffein']['caps']} Caps)",
-        "",
+        f"Plan          : {e['koffein']['plan']}",
     ]
+    if e["koffein"]["caps"]:
+        lines.append(f"Kapseln       : {e['koffein']['caps']} Stk.")
+    lines.append("")
+
+    mix_iv = e.get("mix_intervalle")
+    if mix_iv:
+        lines.append("--- TRAININGS-INTERVALLE (MIX) ---")
+        total_min = sum(iv.get("dauer_min", 0) for iv in mix_iv)
+        for iv in mix_iv:
+            anteil = f"{round(iv['dauer_min'] / total_min * 100)}%" if total_min else ""
+            extra = ""
+            if iv.get("watt"):
+                extra += f"  |  {iv['watt']} W"
+            if iv.get("hf"):
+                extra += f"  |  {iv['hf']} bpm"
+            lines.append(
+                f"  {iv.get('zone', ''):4s}: {iv.get('dauer_min', 0):3d} min ({anteil:>4s})"
+                f"  Carbs/h: {CARBS_PRO_STUNDE.get(iv.get('zone', 'Z2'), 60)} g/h{extra}"
+            )
+        lines.append("")
+
     if wetter_info:
         lines += [
             "--- WETTER ---",
-            f"Temperatur: {wetter_info['avg_temp']} °C  (min {wetter_info['min_temp']} / max {wetter_info['max_temp']})",
-            f"Sonne: {wetter_info['sonne']}  |  Wind: {wetter_info['avg_wind']} km/h  |  Regen: {wetter_info['sum_regen']} mm",
-            "",
+            f"Temperatur    : {wetter_info['avg_temp']} °C  (min {wetter_info['min_temp']} / max {wetter_info['max_temp']})",
+            f"Sonne         : {sonne_label.get(wetter_info.get('sonne', ''), wetter_info.get('sonne', '-'))}",
+            f"Wind          : {wetter_info['avg_wind']} km/h",
+            f"Regen         : {wetter_info['sum_regen']} mm",
         ]
-    lines.append("=== Ende des Plans ===")
+        if wetter_punkte and len(wetter_punkte) > 1:
+            lines.append("  Verlauf entlang der Route:")
+            lines.append(f"  {'km':>5}  {'Uhrzeit':>8}  {'Lat':>9}  {'Lon':>9}  {'Temp':>6}  {'Regen':>7}")
+            for pt in wetter_punkte:
+                lines.append(
+                    f"  {pt.get('km', '?'):>5}  {pt.get('uhrzeit', ''):>8}  "
+                    f"{pt.get('lat', ''):>9.4f}  {pt.get('lon', ''):>9.4f}  "
+                    f"{pt.get('temp_avg', '?'):>5} °C  {pt.get('regen_mm', '?'):>5} mm"
+                )
+        lines.append("")
+
+    if resupply_stopps:
+        lines.append("--- RESUPPLY-STOPPS ---")
+        for i, stopp in enumerate(resupply_stopps):
+            needs = []
+            if stopp.get("braucht_wasser"): needs.append("Wasser")
+            if stopp.get("braucht_carbs"):  needs.append("Carbs")
+            lines.append(f"Stopp {i + 1}  –  km {stopp.get('km', '?')}  [{' + '.join(needs)}]")
+            if stopp.get("lat"):
+                lines.append(f"  Position      : {stopp['lat']:.5f}° N,  {stopp['lon']:.5f}° O")
+            if stopp.get("braucht_wasser"):
+                lines.append(f"  Wasser        : ~{stopp.get('wasser_refill_ml', '?')} ml auffüllen")
+            if stopp.get("braucht_carbs"):
+                einkauf = stopp.get("carbs_einkauf_g", 0)
+                lines.append(f"  Carbs kaufen  : ~{einkauf} g")
+                if einkauf:
+                    lines.append(
+                        f"    z.B. {math.ceil(einkauf / 35)} Riegel (à 35 g)  oder  "
+                        f"{round(einkauf / 25)} Bananen  oder  "
+                        f"{round(einkauf / 0.85):.0f} g Gummibärchen"
+                    )
+            pois = stopp.get("poi_ergebnisse", [])
+            if pois:
+                lines.append("  Einkaufsstationen:")
+                for rank, p in enumerate(pois[:3]):
+                    adresse = (
+                        p.get("strasse", "") + (f", {p['ort']}" if p.get("ort") else "")
+                    ).strip(", ")
+                    marker = "  * " if rank == 0 else "    "
+                    lines.append(
+                        f"{marker}{p['name']} ({p['typ']})  –  km {p['route_km']}  –  {p['dist_m']} m zur Route"
+                    )
+                    if adresse:
+                        lines.append(f"       {adresse}")
+            lines.append("")
+
+    lines += ["=" * 62, "  Ende des Plans", "=" * 62]
     return "\n".join(lines)
+
+
+def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None):
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        return b""
+
+    sf_res = e.get("softflasks", {})
+    wf = e.get("wasserflaschen", {})
+    sonne_label = {"keine": "Bedeckt", "mittel": "Teils sonnig", "stark": "Vollsonne"}
+
+    def _s(text):
+        t = str(text)
+        for src, dst in [("–", "-"), ("—", "-"), ("’", "'"),
+                          ("“", '"'), ("”", '"'), ("≤", "<="),
+                          ("≥", ">="), ("→", "->"), ("×", "x")]:
+            t = t.replace(src, dst)
+        return t.encode("latin-1", errors="replace").decode("latin-1")
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(10, 10, 10)
+    pdf.add_page()
+    W = 190
+
+    def section(title):
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_fill_color(210, 225, 245)
+        pdf.cell(W, 7, _s(title), ln=True, fill=True)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.ln(1)
+
+    def kv(label, value):
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(58, 5.5, _s(label + ":"), ln=False)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(W - 58, 5.5, _s(str(value)))
+
+    def note(text):
+        pdf.set_font("Helvetica", "I", 8.5)
+        pdf.set_text_color(90, 90, 90)
+        pdf.cell(8)
+        pdf.multi_cell(W - 8, 4.5, _s(text))
+        pdf.set_text_color(0, 0, 0)
+
+    # ── Titel ──────────────────────────────────────────────────────────────────
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(W, 11, "Cycling Fueling Plan", ln=True, align="C")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(W, 5.5, _s(f"Profil: {e['profil_name']}"), ln=True, align="C")
+    pdf.cell(W, 5.5,
+             _s(f"Zone: {e['zone']}  |  Dauer: {e['dauer_h']} h  |  Temp: {e['temp']} °C"),
+             ln=True, align="C")
+    pdf.ln(4)
+
+    # ── Kohlenhydrate ──────────────────────────────────────────────────────────
+    section("Kohlenhydrate")
+    kv("Gesamt", f"{e['carbs']['gesamt']} g  ({e['carbs']['pro_h']} g/h via {e['carbs']['quelle']})")
+    kv("Basis", f"{e['carbs']['basis']} g")
+    if e["carbs"].get("hm_bonus"):
+        kv("HM-Bonus", f"{e['carbs']['hm_bonus']} g")
+    kv("Aus Gels (Softflasks)", f"{e['carbs']['aus_gels']} g")
+    kv("Aus Riegeln", f"{e['carbs']['aus_riegeln']} g")
+    if sf_res.get("ratio_info"):
+        kv("Glukose:Fructose", sf_res["ratio_info"].get("label", ""))
+
+    # ── Wasser ─────────────────────────────────────────────────────────────────
+    section("Wasser")
+    kv("Gesamt", f"{e['wasser']['gesamt']} ml  ({e['wasser']['pro_h']} ml/h)")
+    kv("Aus Gels", f"{e['wasser']['aus_gels']} ml")
+    kv("Aus Flaschen (extra)", f"{e['wasser']['zusaetzlich']} ml")
+    if wf:
+        kv("Auffüllungen", f"{wf.get('auffuellungen', 0)}x  (je ~{wf.get('refill_ml', 0)} ml)")
+
+    # ── Softflasks ─────────────────────────────────────────────────────────────
+    section("Softflasks")
+    sf_flaschen = sf_res.get("flaschen", [])
+    if sf_flaschen:
+        for f in sf_flaschen:
+            r = f.get("rezept", {})
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(0, 5.5, _s(f"{f['anzahl']}x {f['name']} ({f['volumen_ml']} ml)"), ln=True)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.cell(8)
+            pdf.cell(0, 5, _s(
+                f"Carbs: {f['carbs_pro_flask']} g  |  Malto: {r.get('maltodextrin', 0)} g  |  "
+                f"Fructose: {r.get('fructose', 0)} g  |  Salz: {r.get('salz', 0)} g  |  "
+                f"Wasser: {r.get('wasser', 0)} ml"
+            ), ln=True)
+    else:
+        r0 = sf_res.get("rezept", {})
+        kv("Anzahl", sf_res.get("anzahl", 0))
+        kv("Rezept", (
+            f"Malto {r0.get('maltodextrin', 0)} g  |  Fructose {r0.get('fructose', 0)} g  |  "
+            f"Salz {r0.get('salz', 0)} g  |  Wasser {r0.get('wasser', 0)} ml"
+        ))
+
+    # ── Riegel ─────────────────────────────────────────────────────────────────
+    if e.get("riegel"):
+        section("Riegel")
+        for r in e["riegel"]:
+            pdf.set_font("Helvetica", "", 10)
+            pdf.cell(8)
+            pdf.cell(0, 5.5, _s(
+                f"{r['anzahl']}x  {r['name']}"
+                f"  (Carbs: {r['carbs_gesamt']} g, davon Zucker: {r['zucker_gesamt']} g)"
+            ), ln=True)
+
+    # ── Elektrolyte & Koffein ──────────────────────────────────────────────────
+    section("Elektrolyte")
+    el = e["elektrolyte"]
+    kv("Produkt", el["name"])
+    kv("Menge", f"{el['portion_g']} g x {el['fuellungen']}  =  {el['gesamt_g']} g")
+
+    section("Koffein")
+    ko = e["koffein"]
+    kv("Plan", ko["plan"])
+    if ko["caps"]:
+        kv("Kapseln", f"{ko['caps']} Stk.")
+
+    # ── Mix-Intervalle ─────────────────────────────────────────────────────────
+    mix_iv = e.get("mix_intervalle")
+    if mix_iv:
+        section("Trainings-Intervalle (Mix)")
+        total_min = sum(iv.get("dauer_min", 0) for iv in mix_iv)
+        cw = [22, 28, 28, 28, 34, 28, 22]
+        hdrs = ["Zone", "Dauer (min)", "Carbs/h", "Wasser/h", "Watt", "HF (bpm)", "Anteil"]
+        pdf.set_font("Helvetica", "B", 9)
+        for h, w in zip(hdrs, cw):
+            pdf.cell(w, 6, h, border=1, align="C")
+        pdf.ln()
+        pdf.set_font("Helvetica", "", 9)
+        for iv in mix_iv:
+            anteil = f"{round(iv['dauer_min'] / total_min * 100)}%" if total_min else ""
+            vals = [
+                iv.get("zone", ""),
+                str(iv.get("dauer_min", 0)),
+                f"{CARBS_PRO_STUNDE.get(iv.get('zone', 'Z2'), 60)} g/h",
+                "-",
+                str(iv["watt"]) if iv.get("watt") else "-",
+                str(iv["hf"]) if iv.get("hf") else "-",
+                anteil,
+            ]
+            for v, w in zip(vals, cw):
+                pdf.cell(w, 5.5, _s(v), border=1, align="C")
+            pdf.ln()
+
+    # ── Wetter ─────────────────────────────────────────────────────────────────
+    if wetter_info:
+        section("Wetter")
+        kv("Temperatur", (
+            f"{wetter_info['avg_temp']} °C  "
+            f"(min {wetter_info['min_temp']} / max {wetter_info['max_temp']})"
+        ))
+        kv("Sonne", sonne_label.get(wetter_info.get("sonne", ""), wetter_info.get("sonne", "-")))
+        kv("Wind", f"{wetter_info['avg_wind']} km/h")
+        kv("Regen", f"{wetter_info['sum_regen']} mm")
+
+        if wetter_punkte and len(wetter_punkte) > 1:
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(0, 5.5, "Wetterverlauf entlang der Route:", ln=True)
+            cw2 = [22, 30, 52, 32, 30, 24]
+            h2 = ["km", "Uhrzeit", "Koordinaten", "Temp (°C)", "Wind", "Regen (mm)"]
+            pdf.set_font("Helvetica", "B", 9)
+            for h, w in zip(h2, cw2):
+                pdf.cell(w, 6, _s(h), border=1, align="C")
+            pdf.ln()
+            pdf.set_font("Helvetica", "", 9)
+            for pt in wetter_punkte:
+                vals = [
+                    str(pt.get("km", "")),
+                    pt.get("uhrzeit", ""),
+                    f"{pt.get('lat', ''):.4f}, {pt.get('lon', ''):.4f}",
+                    f"{pt.get('temp_avg', '')} °C",
+                    "-",
+                    f"{pt.get('regen_mm', '')} mm",
+                ]
+                for v, w in zip(vals, cw2):
+                    pdf.cell(w, 5.5, _s(str(v)), border=1, align="C")
+                pdf.ln()
+
+    # ── Resupply-Stopps ────────────────────────────────────────────────────────
+    if resupply_stopps:
+        section("Resupply-Stopps")
+        for i, stopp in enumerate(resupply_stopps):
+            needs = []
+            if stopp.get("braucht_wasser"): needs.append("Wasser")
+            if stopp.get("braucht_carbs"):  needs.append("Carbs")
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_fill_color(245, 245, 245)
+            pdf.cell(W, 6,
+                     _s(f"Stopp {i + 1}  –  km {stopp.get('km', '?')}  [{' + '.join(needs)}]"),
+                     ln=True, fill=True)
+            pdf.set_font("Helvetica", "", 10)
+            if stopp.get("lat"):
+                note(f"Position: {stopp['lat']:.5f}° N,  {stopp['lon']:.5f}° O")
+            if stopp.get("braucht_wasser"):
+                pdf.cell(8)
+                pdf.cell(0, 5, _s(f"Wasser auffüllen: ~{stopp.get('wasser_refill_ml', '?')} ml"), ln=True)
+            if stopp.get("braucht_carbs"):
+                einkauf = stopp.get("carbs_einkauf_g", 0)
+                pdf.cell(8)
+                pdf.cell(0, 5, _s(f"Carbs kaufen: ~{einkauf} g"), ln=True)
+                if einkauf:
+                    note(
+                        f"z.B. {math.ceil(einkauf / 35)} Riegel (a 35 g)  |  "
+                        f"{round(einkauf / 25)} Bananen  |  "
+                        f"{round(einkauf / 0.85):.0f} g Gummibaerchen"
+                    )
+            pois = stopp.get("poi_ergebnisse", [])
+            if pois:
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.cell(8)
+                pdf.cell(0, 5, "Empfohlene Einkaufsstationen:", ln=True)
+                pdf.set_font("Helvetica", "", 9)
+                for rank, p in enumerate(pois[:4]):
+                    adresse = (
+                        p.get("strasse", "") + (f", {p['ort']}" if p.get("ort") else "")
+                    ).strip(", ")
+                    marker = "* " if rank == 0 else "  "
+                    pdf.cell(14)
+                    pdf.cell(0, 5, _s(
+                        f"{marker}{p['name']} ({p['typ']})"
+                        f"  –  km {p['route_km']}"
+                        f"  –  {p['dist_m']} m zur Route"
+                        + (f"  –  {adresse}" if adresse else "")
+                    ), ln=True)
+            pdf.ln(2)
+
+    # ── Footer ─────────────────────────────────────────────────────────────────
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(160, 160, 160)
+    pdf.cell(W, 5,
+             _s(f"Erstellt mit Cycling Fueling Planner  |  {datetime.now().strftime('%d.%m.%Y %H:%M')}"),
+             ln=True, align="C")
+
+    return bytes(pdf.output())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1788,11 +2126,27 @@ if st.session_state.ergebnis:
 
     # ── Download ──
     st.divider()
-    plan_text = erstelle_plan_text(e, w)
-    st.download_button(
-        label="📥 Plan als .txt herunterladen",
-        data=plan_text,
-        file_name=f"fueling_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-        mime="text/plain",
-        use_container_width=True,
-    )
+    wp = st.session_state.get("wetter_punkte", [])
+    rs = st.session_state.get("resupply_stopps") or []
+    plan_text = erstelle_plan_text(e, w, wp, rs)
+    pdf_bytes = erstelle_plan_pdf(e, w, wp, rs)
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        st.download_button(
+            label="📥 Plan als .txt herunterladen",
+            data=plan_text,
+            file_name=f"fueling_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with dl_col2:
+        if pdf_bytes:
+            st.download_button(
+                label="📄 Plan als PDF herunterladen",
+                data=pdf_bytes,
+                file_name=f"fueling_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.info("PDF nicht verfügbar – `fpdf2` nicht installiert.")
