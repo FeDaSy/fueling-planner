@@ -680,7 +680,7 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
     ]
     if sf_res.get("ratio_info"):
         ri = sf_res["ratio_info"]
-        lines.append(f"Glukose:Frukt. : {ri.get('label', '')}")
+        lines.append(f"Glukose:Frukt. : {ri[2]}")
     lines.append("")
 
     lines += [
@@ -875,7 +875,7 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     kv("Aus Gels (Softflasks)", f"{e['carbs']['aus_gels']} g")
     kv("Aus Riegeln", f"{e['carbs']['aus_riegeln']} g")
     if sf_res.get("ratio_info"):
-        kv("Glukose:Fructose", sf_res["ratio_info"].get("label", ""))
+        kv("Glukose:Fructose", sf_res["ratio_info"][2])
 
     # ── Wasser ─────────────────────────────────────────────────────────────────
     section("Wasser")
