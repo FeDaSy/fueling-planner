@@ -155,9 +155,8 @@ def empfehle_glukose_fructose(carbs_pro_h):
         return (1, 1, "1:1 Maltodextrin:Fructose (maximale Absorption >100 g/h, beide Transporter voll ausgelastet)")
 
 
-def berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h=None):
+def berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h=None, volumen_ml=None):
     sf = profil["softflask"]
-    # Dynamisches Verhältnis wenn carbs_pro_h bekannt, sonst Profil-Einstellung
     if carbs_pro_h is not None:
         malto_ratio, fructose_ratio, _ = empfehle_glukose_fructose(carbs_pro_h)
     else:
@@ -167,7 +166,8 @@ def berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h=None):
     malto = round(carbs_pro_flask * malto_ratio / total)
     fructose = round(carbs_pro_flask * fructose_ratio / total)
     salz = sf["salz_heiss_g"] if temp > sf["temp_heiss_grad"] else sf["salz_normal_g"]
-    wasser = sf["volumen_ml"] - carbs_pro_flask - 1
+    vol = volumen_ml if volumen_ml is not None else sf.get("flaschen", [{}])[0].get("volumen_ml", 500)
+    wasser = vol - carbs_pro_flask - 1
     return {"maltodextrin": malto, "fructose": fructose, "salz": salz, "wasser": max(0, wasser)}
 
 def berechne_koffein(profil, dauer_h):
@@ -236,7 +236,7 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
                 "volumen_ml": f["volumen_ml"],
                 "anzahl": f["anzahl"],
                 "carbs_pro_flask": cpf,
-                "rezept": berechne_gel_rezept(profil, cpf, temp, carbs_pro_h),
+                "rezept": berechne_gel_rezept(profil, cpf, temp, carbs_pro_h, volumen_ml=f["volumen_ml"]),
             })
     carbs_pro_flask = round(carbs_aus_gels / anzahl_flasks) if anzahl_flasks > 0 else 0
     flaschen_kapazitaet_ml = sum(f["volumen_ml"] * f["anzahl"] for f in profil["flaschen"])
