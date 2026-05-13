@@ -1,0 +1,748 @@
+================================================================================
+  CYCLING FUELING PLANNER – Berechnungslogik & APIs
+  Was das Skript tut und wie es rechnet
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+  1. KOHLENHYDRATE (CARBS)
+────────────────────────────────────────────────────────────────────────────────
+
+1a) Zonenbasierte Berechnung (Standard)
+────────────────────────────────────────
+Der Körper verbrennt bei unterschiedlicher Intensität unterschiedlich viele
+Kohlenhydrate pro Stunde. Diese Werte basieren auf Sportliteratur (u.a.
+Jeukendrup, Burke, AIS – Australian Institute of Sport):
+
+    Zone 1 (locker, Erholung):    30 g/h
+    Zone 2 (Grundlage, Aerob):    60 g/h
+    Zone 3 (Tempo, Sweetspot):    75 g/h
+    Zone 4 (Schwellenbereich):    90 g/h
+    Zone 5 (Maximalintensität):   90 g/h
+    Mix (wechselnde Intensität):  gewichteter Durchschnitt (siehe 1e)
+
+Formel:
+    Carbs_Basis = Carbs_pro_h × Dauer_h
+
+
+1b) Wattbasierte Berechnung (Leistungsmesser) – empfohlene Methode
+────────────────────────────────────────────────────────────────────
+Wenn eine Wattangabe vorliegt, wird der Energieverbrauch physikalisch
+aus der mechanischen Leistung berechnet. Diese Methode ist präziser als
+die zonenbasierte, weil sie den tatsächlichen Stoffwechselaufwand abbildet.
+
+Schritt 1 – Kalorienverbrauch:
+    Der menschliche Körper hat einen mechanischen Wirkungsgrad von ca. 22 %.
+    Das heißt: 22 % der verbrannten Energie werden in Bewegung umgewandelt,
+    78 % gehen als Wärme verloren.
+
+    kcal/h = (Watt × 3600 Sekunden) / (4180 J/kcal × 0,22)
+
+    Beispiel bei 200 W:
+    kcal/h = (200 × 3600) / (4180 × 0,22) = 720.000 / 919,6 ≈ 783 kcal/h
+
+Schritt 2 – Kohlenhydrat-Anteil an der Energie:
+    Je höher die Intensität (% der FTP = Functional Threshold Power),
+    desto mehr Kohlenhydrate verbrennt der Körper im Verhältnis zu Fett.
+    Bei niedrigen Intensitäten dominiert Fettverbrennung.
+
+    % FTP    KH-Anteil   Erklärung
+    ─────────────────────────────────────────────────────────────
+    < 55%    35%         Regeneration – hauptsächlich Fett
+    55–75%   50%         Grundlage – gemischte Verbrennung
+    75–90%   72%         Tempo – mehr KH als Fett
+    90–105%  87%         Schwelle – fast ausschließlich KH
+    > 105%   95%         Hochintensiv – nahezu reines KH
+
+Schritt 3 – Carbs aus Energie:
+    Kohlenhydrate liefern ca. 4 kcal pro Gramm.
+
+    Carbs/h = (kcal/h × KH-Anteil) / 4
+
+    Maximal 120 g/h (physiologische Aufnahme-Obergrenze des Darms).
+
+    Beispiel bei 200 W, FTP 270 W (74% FTP → KH-Anteil 50%):
+    Carbs/h = (783 × 0,50) / 4 ≈ 98 g/h
+
+
+1c) Normalized Power (NP) statt Average Power – warum das wichtig ist
+───────────────────────────────────────────────────────────────────────
+WICHTIG: Das Skript erwartet die Normalized Power (NP), nicht die Average Power.
+NP sollte immer bevorzugt werden, wenn sie aus der Trainings-App verfügbar ist.
+
+Warum NP präziser ist:
+    Average Power wird durch Ausrollphasen, Ampelstopps und Abfahrten stark
+    nach unten gedrückt – in diesen Momenten verbraucht der Körper aber kaum
+    Kohlenhydrate. In harten Intervallen dagegen steigt der KH-Verbrauch
+    überproportional an (weil der Carb-Anteil nichtlinear mit der Intensität
+    wächst). Average Power gewichtet alle Phasen gleich und unterschätzt
+    dadurch den tatsächlichen Energieverbrauch systematisch.
+
+    NP (Normalized Power) korrigiert das: Sie gewichtet hohe Intensitäten
+    stärker als niedrige und bildet so den physiologischen Belastungsaufwand
+    einer variablen Fahrt korrekt ab.
+
+Faustregel:
+    - Gleichmäßige Zeitfahrt / Rolle: NP ≈ Average Power (kein Unterschied)
+    - Hügelige Ausfahrt, Gruppenrennen: NP ca. 5–10 % über Average Power
+    - Sehr variables Training (Sprint, Stop-and-Go): NP bis 15 % über Avg
+
+Wo finde ich NP?
+    - Garmin Connect: "Gewichtete Leistung" in der Aktivitätsübersicht
+    - Strava: "Normalisierte Leistung" (nur mit Leistungsmesser sichtbar)
+    - Wahoo / TrainingPeaks: direkt als "NP" oder "Normalized Power"
+
+Rechenbeispiel aus einem realen Training:
+    Durchschnitt: 180 W → 88 g/h → 440 g Basis (5h)
+    NP:           197 W → 96 g/h → 480 g Basis (5h)
+    Unterschied:  +40 g ≈ +9% (relevant für Planung langer Fahrten)
+
+
+1d) Herzfrequenz-basierte Zonenableitung
+──────────────────────────────────────────
+Wenn keine Wattmessung vorhanden ist, kann die Zone aus der
+Herzfrequenz abgeleitet werden.
+
+Zonen nach % der maximalen Herzfrequenz (HRmax):
+
+    Zone 1: bis 60% HRmax    (Erholung)
+    Zone 2: 60–70% HRmax     (Grundlage/Aerob)
+    Zone 3: 70–80% HRmax     (Tempo/Sweetspot)
+    Zone 4: 80–90% HRmax     (Schwelle)
+    Zone 5: über 90% HRmax   (Maximale Intensität)
+
+Die Zone bestimmt dann den Carbs/h-Wert wie in Abschnitt 1a.
+
+Einschränkung – Cardiac Drift:
+    Bei langen Fahrten (ab ca. 2–3 h) steigt die Herzfrequenz bei gleicher
+    Wattleistung an, weil Dehydrierung, Muskelermüdung und Wärmeakkumulation
+    das Herz-Kreislauf-System belasten. Dieses Phänomen heißt Cardiac Drift.
+
+    Konsequenz: Die Durchschnitts-HF einer langen Fahrt erscheint "höher"
+    als die tatsächliche Belastungszone. Das Skript weist ab 3 h Dauer
+    darauf hin, dass HF-Eingaben die Intensität systematisch überschätzen
+    und Watt-Eingabe mit NP zuverlässiger ist.
+
+
+1e) Höhenmeter-Bonus
+──────────────────────
+Bergfahrten erhöhen den Kalorienverbrauch durch mehr Muskelarbeit.
+Das Skript rechnet einen pauschalen Bonus:
+
+    +8 g Kohlenhydrate pro 100 Höhenmeter (Aufstieg)
+
+    Beispiel: 800 Hm → +64 g Carbs
+
+    Carbs_Gesamt = Carbs_Basis + HM_Bonus
+
+
+1f) Mix-Modus (wechselnde Zonen)
+──────────────────────────────────
+Für Trainings mit verschiedenen Intensitätsphasen kann der Mix-Modus genutzt
+werden. Der Benutzer gibt für jede Phase Zone, Dauer und optional Watt/HF an.
+
+Gewichteter Durchschnitt:
+    Carbs/h_gesamt = Summe(Carbs_Zone_i × Dauer_i) / Gesamt_Dauer_min
+
+    Beispiel:
+    45 min Z2 (60 g/h) + 30 min Z4 (90 g/h) + 45 min Z2 (60 g/h)
+    = (60×45 + 90×30 + 60×45) / 120
+    = (2700 + 2700 + 2700) / 120
+    = 67,5 g/h (gewichtet)
+
+Bei Watt-Angaben in den Intervallen:
+    Wenn Watt und FTP bekannt, wird pro Intervall die physikalische
+    Berechnung (Abschnitt 1b) verwendet statt des Zonen-Pauschalwerts.
+    Das Ergebnis ist präziser, insbesondere bei sehr hohen und sehr
+    niedrigen Intensitäten.
+
+Empfehlung für gemischte Trainings:
+    Der Mix-Modus ist die genaueste Methode für variable Fahrten.
+    Als schnelle Alternative: NP in das Einfach-Watt-Feld eingeben.
+
+
+1g) Verteilung auf Gels und Riegel
+────────────────────────────────────
+Die Gesamtmenge wird auf zwei Quellen aufgeteilt:
+  - Softflask-Gels (selbstgemischt): Standard 70% der Carbs
+  - Riegel/Snacks: restliche 30%
+
+Dieses Verhältnis ist im Profil konfigurierbar ("Gel-Anteil").
+
+Riegel werden im Profil mit Name, Carbs pro Stück und Anzahl der
+mitgenommenen Stücke definiert. Das Skript zeigt die Gesamtmenge
+aller mitgenommenen Riegel und wann Carb-Stopps für Nachschub nötig sind.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  2. GEL-REZEPT (SOFTFLASK)
+────────────────────────────────────────────────────────────────────────────────
+
+Das Skript berechnet ein individuelles Gelrezept für selbstgemischte
+Softflasks (Energieflaschen). Mehrere Softflask-Typen mit verschiedenen
+Größen und Stückzahlen sind möglich.
+
+2a) Dynamisches Glucose:Fructose-Verhältnis
+─────────────────────────────────────────────
+Das optimale Verhältnis hängt von der Carb-Aufnahmerate ab. Basis ist
+die Transporterphysiologie des Darms (Jeukendrup 2014):
+
+  - Glucose/Maltodextrin wird über SGLT1 transportiert (max. ca. 60 g/h)
+  - Fructose wird über GLUT5 transportiert (max. ca. 50 g/h)
+
+Das Skript wählt das Verhältnis automatisch nach Carbs/h:
+
+    Carbs/h      Verhältnis Malto:Fructose   Begründung
+    ──────────────────────────────────────────────────────────────────
+    ≤ 60 g/h     Nur Maltodextrin (1:0)      SGLT1 noch nicht saturiert,
+                                              Fructose bringt keinen Vorteil
+    60–80 g/h    2:1 (klassisches Verhältnis) SGLT1 saturiert, GLUT5 sinnvoll
+    80–100 g/h   5:4 (≈1:0,8)                Optimiert für max. Darmaufnahme
+    > 100 g/h    1:1                          Beide Transporter voll ausgelastet,
+                                              maximale Absorption
+
+Praxis-Hinweis: Bei ≤60 g/h ist teures Fructose-Pulver unnötig.
+Ab 80 g/h beginnt der zweite Transporter (GLUT5) entscheidend zu werden.
+
+
+2b) Rezeptformel pro Softflask
+────────────────────────────────
+    Maltodextrin (g) = Carbs_pro_Flask × Malto-Ratio / Summe-Ratios
+    Fructose (g)     = Carbs_pro_Flask × Fructose-Ratio / Summe-Ratios
+    Salz (g)         = 0,7 g normal / 1,0 g bei Hitze (>25°C)
+    Wasser (ml)      = Flask-Volumen − Carbs − 1 ml Reserve
+
+
+2c) Mehrere Softflask-Typen
+─────────────────────────────
+Wenn verschiedene Flask-Größen mitgenommen werden (z.B. 2× 500ml und
+1× 250ml), wird die Carb-Gesamtmenge proportional zum Volumen verteilt:
+
+    Carb-Dichte (g/ml) = Carbs_aus_Gels_gesamt / Gesamtvolumen_aller_Flasks
+
+    Carbs pro Flask Typ = Carb-Dichte × Volumen_dieses_Typs
+
+Jeder Flask-Typ bekommt damit ein eigenes Rezept (Malto, Fructose, Salz,
+Wasser), das proportional zu seiner Größe befüllt ist.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  3. TRINKMENGE / WASSER
+────────────────────────────────────────────────────────────────────────────────
+
+3a) Schweißrate als Basis
+──────────────────────────
+Die Trinkmenge wird aus der individuellen Schweißrate berechnet.
+Das Skript bietet drei kalibrierte Profile:
+
+Preset          bei 10°C    bei 15°C    bei 20°C    bei 25°C    bei >25°C
+─────────────────────────────────────────────────────────────────────────
+Wenig-Schwitzer  150 ml/h    200 ml/h    250 ml/h    320 ml/h    420 ml/h
+Mittel-Schwitzer 250 ml/h    300 ml/h    350 ml/h    450 ml/h    600 ml/h
+Viel-Schwitzer   380 ml/h    500 ml/h    630 ml/h    800 ml/h   1000 ml/h
+
+Die Temperatur wird in Stufen interpoliert – nicht linear, sondern nach
+der nächsten passenden Schwelle.
+
+
+3b) Korrekturfaktoren
+──────────────────────
+Auf die Basisschweißrate werden mehrere Faktoren angewendet:
+
+    Intensitätsfaktor (je nach Zone):
+      Z1: ×0,85   Z2: ×1,00   Z3: ×1,15   Z4: ×1,25   Z5: ×1,30   Mix: ×1,10
+
+    Sonneneinstrahlung:
+      keine Sonne: ×1,00   mittlere Sonne: ×1,10   starke Sonne: ×1,20
+
+    Indoor (Rolle/Heimtrainer):
+      ×1,30 (kein Fahrtwind → weniger Verdunstungskühlung → mehr Schwitzen)
+
+    Frühstart (vor 8 Uhr morgens):
+      ×0,90 (kühler, weniger Sonneneinstrahlung)
+
+    Formel:
+    Wasser/h = Basisrate × Intensitätsfaktor × Sonnenfaktor × Indoor × Frühstart
+
+    Beispiel: Mittel-Schwitzer, 20°C, Zone 3, starke Sonne, outdoor:
+    Wasser/h = 350 × 1,15 × 1,20 × 1,0 × 1,0 ≈ 483 ml/h
+
+
+3c) Geschlecht und Alter als Wasserkorrekturfaktoren
+──────────────────────────────────────────────────────
+Zusätzlich werden Geschlecht und Alter auf die berechnete Wasser/h angewendet
+(Details in Abschnitt 10):
+
+    Frauen:      ×0,92 (−8%)
+    Alter 50–59: ×0,92 (−8%)
+    Alter 60+:   ×0,87 (−13%)
+
+    Diese Faktoren werden multipliziert (gestapelt).
+
+
+3d) Gesamtwassermenge und Auffüllstopps
+─────────────────────────────────────────
+    Wasser_gesamt = Wasser/h × Dauer_h
+
+Das mitgeführte Wasser setzt sich zusammen aus:
+  - Wasser in den Softflasks (ca. 69% des Flask-Volumens)
+  - Wasser in den Trinkflaschen
+
+Wenn die Kapazität nicht ausreicht, berechnet das Skript die Anzahl der
+notwendigen Auffüllstopps.
+
+    Auffüllungen = ceil((Wasser_gesamt − Flask_Wasser − Flaschen_Kapazität) / Refill_Volumen)
+
+
+3e) Puffer-basierte Stopppositionen (mit 82%-Buffer)
+──────────────────────────────────────────────────────
+Damit beim Erreichen eines Auffüllstopps noch eine Reserve vorhanden ist,
+wird nicht gewartet bis die Flasche leer ist, sondern bei 82% Verbrauch:
+
+    km_Stop = km_bisher + (aktuelles_Wasser × 0,82) / Wasser_pro_km
+    Rest_beim_Stop = aktuelles_Wasser × 0,18  (≈ 18% Reserve)
+
+    Nach dem Stopp: Wasser = Rest + neues_Füllvolumen (Carry-over)
+
+Das garantiert, dass der Fahrer nie völlig leer wird.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  4. KOFFEIN
+────────────────────────────────────────────────────────────────────────────────
+
+Koffein verbessert nachweislich die Ausdauerleistung, insbesondere ab
+Stunde 2–3. Das Skript plant den Einsatz nach Dauer:
+
+    Dauer < 2h:     kein Koffein (nicht nötig)
+    2–4h:           1 Cap nach Stunde 2
+    4–6h:           2 Caps (Stunde 2 und 4)
+    6–8h:           4 Caps (Stunden 1, 4, 6, 8)
+    > 8h:           5 Caps (Stunden 1, 4, 7, 9 doppelt, 11)
+
+Die Menge pro Cap ist im Profil konfigurierbar (Standard: 50 mg).
+
+
+────────────────────────────────────────────────────────────────────────────────
+  5. ELEKTROLYTE
+────────────────────────────────────────────────────────────────────────────────
+
+Elektrolyte werden pro Flaschenfullung dosiert:
+  - Normalportion bei Temperaturen unter dem Hitze-Schwellenwert
+  - Erhöhte Portion bei Hitze (Standardschwelle: 20°C)
+
+Die Mineralienwerte (Natrium, Kalium, Chlorid, Calcium, Magnesium) werden
+aus dem Profil gelesen und mit der Anzahl der Füllungen multipliziert.
+
+    Mineralien_gesamt = Mineralien_pro_Portion × Anzahl_Füllungen
+
+Bei Hitze:
+    Mineralien_gesamt = Mineralien_gesamt × (Heißportion / Normalportion)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6. RESUPPLY-PLANUNG (Wasserauffüllung & Carb-Einkauf)
+────────────────────────────────────────────────────────────────────────────────
+
+6a) Wasserstopp-Positionen
+───────────────────────────
+Wenn die mitgeführte Wassermenge nicht für die gesamte Strecke reicht,
+berechnet das Skript automatisch Stopppositionen entlang der GPX-Route:
+
+  1. Wasser_pro_km = Wasser_gesamt / Distanz_km
+  2. Start mit vollem Tank (Flaschen + Flasks)
+  3. Stopp bei 82% verbrauchtem Wasser (18% Reserve bleibt)
+  4. Nach jedem Stopp: Neustart mit (Rest + Auffüllung)
+
+
+6b) Carb-Stopp-Positionen
+───────────────────────────
+Analog berechnet das Skript, wann Riegel-Nachschub eingekauft werden muss:
+
+  1. Carbs_pro_km = Carbs_aus_Riegeln_gesamt / Distanz_km
+  2. Start mit vollem Vorrat (alle mitgenommenen Riegel)
+  3. Stopp bei 80% verbrauchtem Vorrat (20% Reserve bleibt)
+  4. Eingekaufte Menge = benötigter Restbedarf bis zum nächsten Stopp
+
+
+6c) Zusammenführung von Wasser- und Carb-Stopps
+──────────────────────────────────────────────────
+Wenn ein Wasserstopp und ein Carb-Stopp innerhalb von 15 km liegen,
+werden sie zu einem gemeinsamen Stopp zusammengelegt (Mitte der beiden
+km-Positionen). Das reduziert Unterbrechungen.
+
+
+6d) GPS-Positionierung der Stopps
+────────────────────────────────────
+Jedem berechneten Stopp wird der nächste GPX-Punkt der Route zugewiesen.
+Ausgabe: GPS-Koordinaten, Google Maps-Link, Kilometerposition.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  7. DAUERSCHÄTZUNG AUS STRECKE
+────────────────────────────────────────────────────────────────────────────────
+
+Wenn keine genaue Dauer angegeben wird, schätzt das Skript anhand von
+Durchschnittsgeschwindigkeiten je Zone:
+
+    Zone 1: 22 km/h   Zone 2: 24 km/h   Zone 3: 28 km/h
+    Zone 4: 32 km/h   Zone 5: 32 km/h   Mix:    25 km/h
+
+    Dauer = Distanz / Geschwindigkeit + (Höhenmeter / 100) × (6 min / 100 Hm)
+
+    Beispiel: 100 km, 1000 Hm, Zone 2:
+    Dauer = 100/24 + (1000/100)×(6/60) = 4,17 + 1,0 = 5,2 h
+
+
+────────────────────────────────────────────────────────────────────────────────
+  8. GENUTZTE APIs (alle kostenlos, kein Account nötig)
+────────────────────────────────────────────────────────────────────────────────
+
+8a) Open-Meteo – Wetterdaten (Einzelpunkt)
+────────────────────────────────────────────
+Webseite:   https://open-meteo.com
+Lizenz:     CC BY 4.0 (kostenlos, kein API-Key, kein Account)
+Daten von:  NOAA, DWD, ECMWF (Europäisches Wetterzentrum)
+
+Was wird abgerufen:
+  - Temperatur in 2 m Höhe (°C)
+  - Relative Luftfeuchtigkeit (%)
+  - Niederschlag (mm/h)
+  - Windgeschwindigkeit in 10 m Höhe (km/h)
+  - Wolkenbedeckung (%)
+  - UV-Index
+
+Abfrage-Prinzip:
+  Die API wird mit Latitude, Longitude und Datum aufgerufen.
+  Zurück kommen stündliche Werte für den gewählten Tag.
+  Das Skript filtert die Stunden des Trainings heraus und berechnet
+  Durchschnittswerte (Temperatur, Wind, Wolken) sowie Maximum (UV).
+  Aus Wolkenbedeckung + UV-Index wird die Sonnenstärke abgeleitet:
+    - > 70% Wolken oder UV < 3 → "keine Sonne"
+    - > 30% Wolken oder UV < 6 → "mittlere Sonne"
+    - Sonst                    → "starke Sonne"
+
+Beispiel-URL:
+  https://api.open-meteo.com/v1/forecast?latitude=52.15&longitude=10.41
+  &hourly=temperature_2m,precipitation,wind_speed_10m,cloud_cover,uv_index
+  &timezone=Europe/Berlin&start_date=2025-06-01&end_date=2025-06-01
+
+
+8b) Open-Meteo – Mehrpunkt-Wetter für lange Routen
+────────────────────────────────────────────────────
+Bei Routen über 80 km werden Wetterdaten an mehreren Punkten entlang
+der Strecke abgerufen, um Wetterveränderungen über die Fahrzeit zu
+berücksichtigen.
+
+Anzahl der Messpunkte:
+    < 80 km:   1 Punkt (Startpunkt)
+    80–120 km: 2 Punkte
+    120–180 km: 3 Punkte
+    180–240 km: 4 Punkte
+    240–300 km: 5 Punkte
+    > 300 km:   6 Punkte (Maximum)
+
+Zeitschätzung pro Punkt:
+    Das Skript schätzt die Ankunftszeit an jedem Messpunkt basierend auf
+    der geplanten Durchschnittsgeschwindigkeit (je nach Zone). So wird für
+    den API-Aufruf die richtige Uhrzeit verwendet.
+
+    Beispiel: Start 08:00 Uhr, 60 km/h Strecke bis Punkt 2 → Ankunft ca. 10:30 Uhr
+    → Open-Meteo-Aufruf für 10:00 Uhr am Standort von Punkt 2
+
+Zusammenführung:
+    Alle Messpunkte werden zu einem einzigen Durchschnittswert zusammen-
+    geführt (Mittelwert aller Temperaturen, Summe Regen, Max UV etc.).
+    Dieser Gesamtwert fließt dann in die Carb- und Wasserberechnung ein.
+
+    Die Einzelpunkte werden zusätzlich als Tabelle im Ergebnis angezeigt:
+    km-Position, geschätzte Uhrzeit, Temperatur, Regen.
+
+
+8c) Overpass API – POI-Suche (OpenStreetMap)
+──────────────────────────────────────────────
+Webseite:   https://overpass-api.de
+Lizenz:     ODbL (OpenStreetMap-Daten, kostenlos, kein Key)
+Betrieben von: OpenStreetMap Foundation
+
+Was wird abgerufen:
+    Tankstellen, Supermärkte, Kioske, Lebensmittelläden, Bäckereien
+    im Umkreis von 500 m um die Route (nicht nur um den exakten Stopppunkt).
+
+Suchstrategie – Routen-Fenster:
+    Das Skript sucht nicht nur am exakten Stopppunkt, sondern im gesamten
+    25-km-Fenster vor dem berechneten Stopp. So wird eine Station gefunden,
+    die zwar etwas früher liegt, aber direkt an der Route ist – statt auf
+    einen exakt berechneten Punkt zu warten, der vielleicht im Wald liegt.
+
+    Suchfenster: km_start = max(0,5, km_stop − 25) bis km_stop
+    Sample-Punkte: alle 2 km innerhalb des Fensters
+    Radius: 500 m um die gesamte Routenpolylinie
+
+Overpass-Anfrage (Polyline-Suche):
+    Statt N separate Punktanfragen zu senden, wird eine einzige Abfrage
+    mit allen Routenpunkten als Polyline gesendet:
+
+    [out:json][timeout:12];
+    (
+      node["amenity"="fuel"](around:500,lat1,lon1,lat2,lon2,...);
+      node["amenity"="supermarket"](around:500,lat1,lon1,...);
+      node["shop"="supermarket"](around:500,...);
+      node["shop"="convenience"](around:500,...);
+      node["shop"="grocery"](around:500,...);
+      node["shop"="bakery"](around:500,...);
+    );
+    out body;
+
+Ranking der Ergebnisse:
+    - Entfernung zur Route: Ergebnisse mit ≤300 m Abstand kommen zuerst
+    - Innerhalb einer Entfernungskategorie: weiter hinten auf der Route
+      (nahe am Stopp-Deadline) bevorzugt
+    - Angezeigt werden die Top-6 Stationen pro Stopp mit:
+      Name, Typ, Adresse, km-Position auf der Route, Distanz zur Route,
+      Google Maps-Link
+
+Technischer Hinweis:
+    Die Overpass API verlangt einen User-Agent-Header im HTTP-Request,
+    sonst antwortet sie mit Fehler 406. Das Skript sendet:
+      User-Agent: FuelingPlanner/2.0 (cycling nutrition)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  9. GPX-VERARBEITUNG
+────────────────────────────────────────────────────────────────────────────────
+
+GPX (GPS Exchange Format) ist ein XML-basiertes Format für Strecken.
+Das Skript liest GPX-Dateien von Komoot, Strava, Garmin Connect usw.
+
+Was ausgelesen wird:
+  - Streckenname
+  - Alle Trackpunkte mit Latitude, Longitude, Höhe (Elevation)
+
+Was berechnet wird:
+  - Distanz: Summe aller Abstände zwischen aufeinanderfolgenden Punkten
+    (Haversine-Formel, berücksichtigt die Erdkrümmung)
+  - Höhenmeter aufwärts: Summe aller positiven Höhendifferenzen
+  - Höhenmeter abwärts: Summe aller negativen Höhendifferenzen
+  - Kumulative Distanz: Für jeden Punkt die bisher zurückgelegte Strecke
+    (wird für die Berechnung der Stopppositionen benötigt)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  10. HAVERSINE-FORMEL (Entfernungsberechnung auf der Erdkugel)
+────────────────────────────────────────────────────────────────────────────────
+
+Die Erde ist eine Kugel – daher kann man Entfernungen zwischen zwei
+GPS-Koordinaten nicht mit Pythagoras berechnen. Die Haversine-Formel
+berechnet den kürzesten Weg auf der Kugeloberfläche:
+
+    a = sin²(Δlat/2) + cos(lat1) × cos(lat2) × sin²(Δlon/2)
+    c = 2 × atan2(√a, √(1−a))
+    d = R × c
+
+    R = 6371 km (mittlerer Erdradius)
+    Δlat = lat2 − lat1 (in Radiant)
+    Δlon = lon2 − lon1 (in Radiant)
+
+Diese Formel wird im Skript an mehreren Stellen verwendet:
+  1. GPX-Distanzberechnung (zwischen je zwei aufeinanderfolgenden Punkten)
+  2. POI-Entfernungsberechnung (Abstand eines Ladens zur Route)
+  3. Mehrpunkt-Wetter (Abstandsberechnung zwischen Wetterpunkten)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  11. ALTER & GESCHLECHT ALS KORREKTURFAKTOREN
+────────────────────────────────────────────────────────────────────────────────
+
+Das Skript berücksichtigt biologisches Geschlecht und Alter als optionale
+Korrekturfaktoren für die Schweißrate und damit für die Trinkmenge.
+
+
+11a) Was die Literatur sagt
+────────────────────────────
+Die folgende Tabelle fasst zusammen, für welche Parameter Unterschiede
+wissenschaftlich belegt und groß genug für die Praxis sind:
+
+  Parameter             Geschlecht           Alter           Quelle
+  ─────────────────────────────────────────────────────────────────────────────
+  Schweißrate           Frauen −8 %          50–59 J.: −8 %  Barr et al.,
+  (ml/h)                (absolute Menge      60+ J.:  −13 %  Kenefick et al.,
+                        bei gleicher                         Inoue et al.
+                        Fitness/Belastung)
+
+  Natrium-Verlust       Frauen −25–30 %      unklar           Shirreffs et al.,
+  (mg/h)                (folgt aus           (Datenlücke)    McCubbin et al.
+                        geringerer
+                        Schweißrate)
+
+  Kohlenhydrat-         kein sinnvoller      kein sinnvoller Jeukendrup et al.,
+  Bedarf (g/h)          Korrekturfaktor      Korrekturfaktor Burke et al.
+                        (<5 % Unterschied,   (verschwindet   (IOC Consensus
+                        intensitäts-         bei trainierten 2010)
+                        abhängig)            Athleten)
+
+  Koffeinwirkung        kein Unterschied     kein Unterschied ISSN Position
+                        nachgewiesen         nachgewiesen    Stand 2021
+
+  Elektrolyte           Hinweis (s. u.)      keine           ACSM 2009
+  (Kapseln/Pulver)                           Empfehlung
+
+
+11b) Warum Frauen weniger schwitzen
+─────────────────────────────────────
+Frauen aktivieren im Schnitt eine ähnliche Anzahl von Schweißdrüsen wie Männer,
+produzieren aber weniger Schweiß pro Drüse. Der Mechanismus ist hormonal:
+Östrogen senkt die Schweißschwelle (Schwitzen beginnt früher), aber die Menge
+pro Drüse ist geringer. Der Gesamtunterschied beträgt ca. 13 % absolut.
+Bei Normierung auf Körperoberfläche schrumpft er auf ca. 3–8 %.
+
+Das Skript verwendet −8 % als Kompromisswert (Mitte zwischen 3 % und 13 %).
+
+
+11c) Warum ältere Athleten weniger schwitzen
+──────────────────────────────────────────────
+Ab ca. 50 Jahren nimmt die Schweißdrüsenaktivität messbar ab. Betroffen ist
+die Ausgabemenge pro Drüse, nicht die Anzahl der Drüsen. Das hat zwei Folgen:
+
+  - Weniger Schweiß pro Stunde → weniger Trinken nötig (absolute Menge)
+  - Aber: schlechtere Wärmeabgabe → höhere Kerntemperatur und Herzfrequenz
+    bei Hitzebelastung
+
+Für den Plan gilt: Die Trinkmenge kann reduziert werden, aber die Flüssigkeit
+muss trotzdem aufgenommen werden, weil die Wärmeregelung weniger effizient ist.
+
+Trainierte Masters-Athleten (regelmäßig trainierend > 50 Jahre) zeigen
+deutlich kleinere Abweichungen als untrainierte ältere Personen. In diesem
+Fall den Schweißtyp manuell auf "Viel" anpassen, um den Faktor zu korrigieren.
+
+Faktoren im Skript:
+  50–59 Jahre: ×0,92 (−8 %)
+  60+ Jahre:   ×0,87 (−13 %)
+
+
+11d) Stapeln der Faktoren
+──────────────────────────
+Geschlechts- und Altersfaktor werden multipliziert:
+
+  Wasser/h_korrigiert = Wasser/h_basis × Geschlechtsfaktor × Altersfaktor
+
+  Beispiel: Frau, 62 Jahre, Mittel-Schweisstyp, 20°C, Zone 2:
+    Basis:         350 ml/h
+    × Zone Z2:     × 1,00
+    × Frau:        × 0,92
+    × Alter 60+:   × 0,87
+    = 350 × 0,92 × 0,87 ≈ 280 ml/h  (statt 350 ml/h beim 30-jährigen Mann)
+
+  Alle anderen Faktoren (Sonne, Indoor, Frühstart) werden zusätzlich angewendet.
+
+
+11e) Natrium und Elektrolyte bei Frauen
+─────────────────────────────────────────
+Da die Natriumkonzentration im Schweiß sich zwischen Männern und Frauen
+kaum unterscheidet (Männer: ~36 mmol/L, Frauen: ~34 mmol/L), folgt der
+geringere Natriumverlust der Frauen direkt aus der geringeren Schweißmenge:
+
+  Natrium-Verlust ≈ Schweißrate × Natriumkonzentration
+
+  Frauen verlieren damit ca. 25–30 % weniger Natrium pro Stunde.
+
+Das Skript zeigt bei weiblichem Profil einen Hinweis im Elektrolyt-Abschnitt,
+verändert die Portionsmenge aber nicht automatisch – da die Elektrolytmengen
+vom Benutzer per Produktetikett eingetragen werden und keine einheitliche
+Formel für alle Produkte existiert.
+
+
+11f) Was das Skript NICHT anpasst – und warum
+───────────────────────────────────────────────
+
+Kohlenhydrate (g/h):
+  Der Unterschied von ca. 7–10 % (Frauen oxidieren mehr Fett) verschwindet,
+  sobald die Intensität relativ zur eigenen Leistungsfähigkeit (% FTP oder
+  % VO2max) angegeben wird – was in diesem Skript der Normalfall ist.
+  Ein pauschaler Abzug wäre daher irreführend.
+
+Koffein:
+  Die ISSN (2021) stellt fest, dass Koffein bei Männern, Frauen, Jungen und
+  Alten gleich wirksam ist. Entscheidender ist der genetische Stoffwechseltyp
+  (schneller vs. langsamer CYP1A2-Metabolisierer), nicht Alter oder Geschlecht.
+
+Körpermasse:
+  Die Körpermasse ist der stärkste Prädiktor für Schweißrate und
+  Kohlenhydratbedarf. Da Benutzer über Schweißtyp und FTP ihre individuelle
+  Physiologie bereits eingeben, wird kein zusätzliches Körpergewicht abgefragt.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  12. NORMALIZED POWER (NP) – WISSENSCHAFTLICHER HINTERGRUND
+────────────────────────────────────────────────────────────────────────────────
+
+12a) Das Problem mit Average Power
+─────────────────────────────────────
+Radfahren ist selten gleichmäßig. Ampeln, Abfahrten, Ausrollphasen und Sprints
+führen zu stark variierender Leistungsabgabe. Average Power mittelt alle Werte
+gleichgewichtig – auch die Nullwerte beim Ausrollen. Dadurch wird der
+physiologische Aufwand einer variablen Fahrt systematisch unterschätzt.
+
+Konkretes Problem für die Carb-Berechnung:
+  - Der Carb-Verbrennungsanteil wächst NICHTLINEAR mit der Intensität
+  - 1 Minute bei 400 W verbraucht überproportional mehr KH als
+    4 Minuten bei 100 W – auch wenn der Durchschnitt identisch wäre
+  - Eine Carb-Berechnung mit Average Power ignoriert diesen Effekt
+
+
+12b) Was NP besser macht
+──────────────────────────
+Normalized Power (NP) approximiert den "metabolischen Aufwand-Äquivalent"
+einer variablen Fahrt als wäre sie gleichmäßig gewesen. Algorithmus:
+
+  1. Glättung der Leistungsdaten mit 30-Sekunden-Rollmittel
+  2. Erhebung zur 4. Potenz (gewichtet hohe Werte stark)
+  3. Mittelwert dieser Werte
+  4. Wurzel 4. Grades → NP
+
+Ergebnis: NP ist bei gleichmäßiger Fahrt ≈ Average Power.
+          NP ist bei variabler Fahrt höher als Average Power.
+
+
+12c) Praktische Einordnung
+────────────────────────────
+  Fahrtyp                            NP vs. Avg Power
+  ─────────────────────────────────────────────────────
+  Zeitfahrt / Ergometer / Rolle      NP ≈ Avg (+0–2%)
+  Gleichmäßige Ausfahrt, flach       NP ≈ Avg (+2–5%)
+  Hügelige Ausfahrt                  NP +5–10%
+  Gruppenrennen / Kriterium          NP +10–20%
+  Sehr variabel (Stadtfahrt, MTB)    NP +15–25%
+
+  Für die Carb-Planung bedeutet jedes +5% NP über Avg ca. +4–6 g/h mehr
+  Kohlenhydrate (abhängig von der Basisintensität).
+
+
+12d) Empfehlung für die App-Nutzung
+──────────────────────────────────────
+  1. BESTE METHODE: Mix-Modus mit tatsächlicher Zonenverteilung aus
+     Garmin/Strava verwenden (z.B. 30% Z1, 25% Z2, 27% Z3, 13% Z4)
+
+  2. GUTE METHODE: NP in das Watt-Feld eingeben
+     (Garmin: "Gewichtete Leistung" | Strava: "Normalisierte Leistung")
+
+  3. AUSREICHEND: Average Power + manuell Zone eine Stufe höher wählen
+
+  4. VERMEIDEN: Average Power + berechnete Zone direkt übernehmen
+     → systematische Unterschätzung des Carb-Bedarfs bei variablen Fahrten
+
+
+Quellen:
+  - Coggan A. (2003): Normalized Power – originale Beschreibung
+  - Jeukendrup A. (2014): A Step Towards Personalized Sports Nutrition, Sports Med
+  - Barr et al. (1991), Med Sci Sports Exerc: Geschlechtsdifferenzen Schweißrate
+  - Kenefick et al. (2012), J Appl Physiol: Schweißrate und Alter
+  - Inoue et al. (1999), J Appl Physiol: Alterseffekte auf Schweißdrüsen
+  - Shirreffs & Maughan (1997): Schweiß-Natriumkonzentration und Geschlecht
+  - McCubbin et al. (2020), Int J Sport Nutr: Natrium und Elektrolyte
+  - ISSN Position Stand (2021): Koffein und Sport
+  - IOC Consensus Statement on Sports Nutrition (2010)
+  - ACSM Position Stand (2009): Exercise and Fluid Replacement
+
+
+================================================================================

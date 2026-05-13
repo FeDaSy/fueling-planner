@@ -21,13 +21,27 @@ AUFFUELL_BUFFER_PCT = 0.82
 
 # ── Glykogen-Speicher (g pro kg Körpergewicht) ────────────────────────────────
 # Basis: Muskelglykogen (~80%) + Leberglykogen (~20%).
-# Quellen: Jeukendrup & Gleeson (2010), Burke (2015), Hawley & Leckey (2015).
+# Quellen: Jeukendrup & Gleeson (2010), Burke (2015), Hawley & Leckey (2015),
+# Tarnopolsky et al. (2007) für Geschlechtsunterschiede.
 # Werte konservativ in der Mitte typischer Messbereiche.
+#
+# Geschlecht: Frauen haben bei gleichem Körpergewicht ~10–15% weniger Muskelmasse
+# (FFM-Anteil m: ~42%, w: ~36%) und damit weniger absolute Glykogenkapazität.
+# Carbo-Loading-Response ist bei Frauen zusätzlich gedämpft (20–30% vs. 40–50%
+# Steigerung bei Männern), wenn der absolute KH-Anteil <8 g/kg/Tag liegt.
 GLYKOGEN_SPEICHER_G_PRO_KG = {
-    "untrained": 6.0,          # ~450 g bei 75 kg
-    "trained": 8.0,            # ~600 g bei 75 kg – Standard für Hobby-Ausdauersportler
-    "trained_loaded": 11.0,    # ~825 g bei 75 kg – nach 2–3 Tagen Carbo-Loading
-    "elite_loaded": 13.0,      # ~975 g bei 75 kg – Elite + Loading
+    "Männlich": {
+        "untrained": 6.0,          # ~450 g bei 75 kg
+        "trained": 8.0,            # ~600 g bei 75 kg
+        "trained_loaded": 11.0,    # ~825 g bei 75 kg
+        "elite_loaded": 13.0,      # ~975 g bei 75 kg
+    },
+    "Weiblich": {
+        "untrained": 5.3,          # −12% (geringere FFM)
+        "trained": 7.0,            # −12% (geringere FFM)
+        "trained_loaded": 9.0,     # −18% (Loading-Response gedämpft)
+        "elite_loaded": 10.5,      # −19% (Loading-Response gedämpft)
+    },
 }
 # Performance-Schwellen (% Speicher-Rest)
 GLYKOGEN_ZONEN = [
@@ -164,7 +178,11 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
     """
     gewicht = profil.get("koerpergewicht_kg", 75)
     status = profil.get("trainings_status", "trained")
-    g_pro_kg = GLYKOGEN_SPEICHER_G_PRO_KG.get(status, 8.0)
+    geschlecht = profil.get("geschlecht", "Männlich")
+    # Geschlechtsspezifische g/kg-Werte (Frauen: −12 bis −19% je nach Loading-Status)
+    speicher_tabelle = GLYKOGEN_SPEICHER_G_PRO_KG.get(geschlecht,
+                                                     GLYKOGEN_SPEICHER_G_PRO_KG["Männlich"])
+    g_pro_kg = speicher_tabelle.get(status, 8.0)
     speicher_voll_g = round(gewicht * g_pro_kg)
     speicher_start_g = round(speicher_voll_g * start_voll_pct)
 
@@ -255,6 +273,7 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
     return {
         "koerpergewicht_kg": gewicht,
         "trainings_status": status,
+        "geschlecht": geschlecht,
         "g_pro_kg": g_pro_kg,
         "speicher_voll_g": speicher_voll_g,
         "speicher_start_g": speicher_start_g,
@@ -1349,10 +1368,10 @@ with st.sidebar:
         ),
     )
     trainings_optionen = {
-        "untrained": "Untrainiert (Hobby, <3h/Woche) – ~6 g/kg",
-        "trained": "Trainiert (Standard) – ~8 g/kg",
-        "trained_loaded": "Trainiert + Carbo-Loading (2–3 Tage geladen) – ~11 g/kg",
-        "elite_loaded": "Elite + Loading – ~13 g/kg",
+        "untrained": "Untrainiert (Hobby, <3h/Woche)",
+        "trained": "Trainiert (Standard)",
+        "trained_loaded": "Trainiert + Carbo-Loading (2–3 Tage geladen)",
+        "elite_loaded": "Elite + Loading",
     }
     aktueller_status = profil.get("trainings_status", "trained")
     if aktueller_status not in trainings_optionen:
@@ -1363,12 +1382,19 @@ with st.sidebar:
         index=list(trainings_optionen.keys()).index(aktueller_status),
         format_func=lambda k: trainings_optionen[k],
         help=(
-            "Bestimmt die Größe deines Glykogenspeichers:\n"
-            "• **Untrainiert:** ~6 g/kg Körpergewicht\n"
-            "• **Trainiert:** ~8 g/kg (Hobby-Ausdauer regelmäßig)\n"
-            "• **Trainiert + geladen:** ~11 g/kg (2–3 Tage gezieltes Carbo-Loading vor dem Event)\n"
-            "• **Elite + geladen:** ~13 g/kg (Profi-Ausdauer)\n\n"
-            "Quellen: Jeukendrup & Gleeson (2010), Burke (2015)."
+            "Bestimmt die Größe deines Glykogenspeichers (g pro kg Körpergewicht):\n\n"
+            "**Männer / Frauen:**\n"
+            "• Untrainiert: 6.0 / 5.3 g/kg\n"
+            "• Trainiert: 8.0 / 7.0 g/kg\n"
+            "• Trainiert + geladen: 11.0 / 9.0 g/kg\n"
+            "• Elite + geladen: 13.0 / 10.5 g/kg\n\n"
+            "Frauen haben bei gleichem Gewicht ~12% weniger Muskelmasse "
+            "(geringere fettfreie Masse) und damit weniger absolute Glykogenkapazität. "
+            "Beim Carbo-Loading ist die Response zusätzlich gedämpft (20–30% vs. "
+            "40–50% Steigerung bei Männern), außer der KH-Anteil liegt sehr hoch "
+            "(>8 g/kg/Tag). Daher konservative Loading-Werte für Frauen.\n\n"
+            "Quellen: Jeukendrup & Gleeson (2010), Burke (2015), "
+            "Tarnopolsky et al. (2007), James et al. (2001)."
         ),
     )
 
@@ -2192,7 +2218,7 @@ if st.session_state.ergebnis:
             "Speicher voll",
             f"{bilanz['speicher_voll_g']} g",
             help=f"{bilanz['koerpergewicht_kg']} kg × {bilanz['g_pro_kg']} g/kg "
-                 f"({bilanz['trainings_status']})",
+                 f"({bilanz['geschlecht']}, {bilanz['trainings_status']})",
         )
         c2.metric(
             "Verbrauch (echt)",
@@ -2256,6 +2282,11 @@ if st.session_state.ergebnis:
                 f"""
 **Speichergröße:** {bilanz['koerpergewicht_kg']} kg × {bilanz['g_pro_kg']} g/kg
 = **{bilanz['speicher_voll_g']} g** Glykogen total (Muskel + Leber).
+Werte für {bilanz['geschlecht']}, Status: {bilanz['trainings_status']}.
+
+**Geschlechtsunterschied:** Frauen haben bei gleichem Körpergewicht ~12% weniger
+Muskelmasse (geringere FFM) und damit weniger absolute Glykogenkapazität.
+Carbo-Loading-Response ist zusätzlich gedämpft (Tarnopolsky et al. 2007).
 
 **Verbrauch pro Stunde:** Aus Watt × Wirkungsgrad und KH-Anteil je % FTP
 (siehe Energie-Sektion), aber OHNE den 120-g-Aufnahme-Cap – der Körper
@@ -2270,7 +2301,8 @@ Kumuliert ergibt das den Speicherstand zu jeder Stunde.
 - 🟠 15–30 %: spürbare Schwäche, Substratverschiebung Richtung Fett
 - 🔴 <15 %: akute Hungerast-Gefahr
 
-**Quellen:** Jeukendrup & Gleeson (2010), Burke (2015), Hawley & Leckey (2015).
+**Quellen:** Jeukendrup & Gleeson (2010), Burke (2015), Hawley & Leckey (2015),
+Tarnopolsky et al. (2007), James et al. (2001).
 
 **Limitationen:** Das Modell rechnet linear und ignoriert die natürliche
 Glykogen-Sparwirkung bei längeren Belastungen (Substratverschiebung zu Fett
