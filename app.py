@@ -1686,8 +1686,40 @@ with st.sidebar:
 
 st.title("🚴 Cycling Fueling Planner")
 st.caption("Berechne deinen persönlichen Ernährungs- und Trinkplan für die nächste Ausfahrt.")
-st.caption("© 2024–2025 Felix Manasov · Alle Rechte vorbehalten · "
-           "[Nutzungsbedingungen & Lizenz](https://github.com/felixmanasov/fueling-planner/blob/main/LICENSE)")
+st.caption("© 2024–2025 Felix Manasov · Alle Rechte vorbehalten")
+with st.expander("📄 Nutzungsbedingungen & Lizenz"):
+    st.markdown("""
+**NUTZUNGSRECHT (ERLAUBT)**
+Die öffentlich zugängliche Web-Applikation darf kostenlos und ohne Registrierung für
+persönliche, nicht-kommerzielle Zwecke genutzt werden. Das Aufrufen der App-URL,
+das Eingeben von Trainingsdaten und das Herunterladen der generierten Pläne (PDF, TXT)
+ist ausdrücklich erlaubt.
+
+**URHEBERRECHTSSCHUTZ**
+Der Quellcode dieser Software ist urheberrechtlich geschützt.
+Die Sichtbarkeit des Codes im GitHub-Repository dient ausschließlich dem technischen
+Deployment auf der Streamlit Community Cloud und stellt keine Lizenzierung zur Nutzung,
+Kopie oder Modifikation des Codes dar.
+
+**VERBOTENE HANDLUNGEN** *(ohne schriftliche Genehmigung)*
+- Kopieren, Reproduzieren oder Vervielfältigen des Quellcodes (ganz oder in Teilen)
+- Modifizieren, Anpassen oder Erstellen abgeleiteter Werke auf Basis dieses Codes
+- Weitergabe, Veröffentlichung oder Verkauf des Codes an Dritte
+- Kommerzielle Nutzung des Codes, der generierten Inhalte oder der Berechnungslogik
+- Entfernen oder Verändern dieses Urheberrechtsvermerks
+
+**KEINE GARANTIE**
+Die Software wird "wie besehen" (AS IS) bereitgestellt, ohne Garantie jeglicher Art.
+Die berechneten Ernährungs- und Trinkempfehlungen ersetzen keine professionelle
+sportmedizinische Beratung.
+
+**Geltendes Recht:** Deutsches Recht (UrhG) und EU-Urheberrecht.
+
+**Lizenzanfragen:** [GitHub Issues](https://github.com/felixmanasov/fueling-planner/issues)
+
+---
+*Cycling Fueling Planner – © 2024–2025 Felix Manasov – Alle Rechte vorbehalten*
+""")
 
 # ── GPX-Upload (AUSSERHALB des Formulars – funktioniert sonst nicht) ──────────
 st.subheader("1. Route")
