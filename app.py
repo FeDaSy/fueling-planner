@@ -32,6 +32,27 @@ import streamlit as st
 
 # ── Konstanten ────────────────────────────────────────────────────────────────
 CARBS_PRO_STUNDE = {"Z1": 30, "Z2": 60, "Z3": 75, "Z4": 90, "Z5": 90, "Mix": 70}
+
+# ── Progressive Carb-Matrix (Zone × kumulierte Zeit) ─────────────────────────
+# Wissenschaftliche Basis:
+# - Vøllestad & Blom (1985): zonenspezifische Glykogenabbauraten
+# - Jeukendrup (2014, PMC4008807): durationsbasierte Carb-Empfehlungen
+# - Gonzalez & van Loon (2016): Leberglykogenschutz ab 90 g/h bei >150 min
+# - Impey & Morton (2018): Glykogen-Schwellen-Hypothese
+# Logik: Stunde 1 = Glykogenspeicher voll → weniger exogene Carbs nötig.
+#        Ab Stunde 3+ steigt Abhängigkeit von exogenen Carbs stark an.
+#        Deckel bei Z4/Z5 trotz hohem Bedarf: Darmblutfluss sinkt um ~70%
+#        bei >80% VO2max → Absorption limitiert, nicht Muskelnachfrage.
+# Aufbau: Liste von (max_kumuliert_min, {zone: g_per_h})
+# Letzte Zeile gilt für alle darüber hinausgehenden Zeiten.
+PROGRESSIVE_CARBS_MATRIX = [
+    # kum.min  Z1   Z2   Z3   Z4   Z5
+    ( 60,  {"Z1": 10, "Z2": 35, "Z3": 50, "Z4": 60, "Z5": 60}),
+    (120,  {"Z1": 20, "Z2": 55, "Z3": 70, "Z4": 85, "Z5": 85}),
+    (180,  {"Z1": 30, "Z2": 68, "Z3": 85, "Z4": 90, "Z5": 90}),
+    (240,  {"Z1": 40, "Z2": 83, "Z3": 90, "Z4": 90, "Z5": 90}),
+    (9999, {"Z1": 50, "Z2": 90, "Z3": 90, "Z4": 90, "Z5": 90}),
+]
 INTENSITAETS_FAKTOR = {"Z1": 0.85, "Z2": 1.0, "Z3": 1.15, "Z4": 1.25, "Z5": 1.3, "Mix": 1.1}
 SONNEN_FAKTOR = {"keine": 1.0, "mittel": 1.1, "stark": 1.2}
 POWER_ZONEN = [(0.55, "Z1"), (0.75, "Z2"), (0.90, "Z3"), (1.05, "Z4"), (float("inf"), "Z5")]
@@ -123,6 +144,62 @@ DEFAULT_PROFIL = {
 }
 
 # ── Backend-Funktionen ────────────────────────────────────────────────────────
+
+def berechne_progressive_carbs_plan(zone, dauer_h, carbs_pro_h_watt=None):
+    """
+    Berechnet stündliche Carb-Empfehlungen progressiv nach Zone und kumulierter Zeit.
+
+    Bei Watt-Eingabe: carbs_pro_h_watt ist die wattbasierte g/h-Rate für die erste
+    Stunde. Die Matrix skaliert relative Steigerungen darauf auf.
+    Bei Zonen-Eingabe: direkte Matrixwerte.
+
+    Returns: list of dicts mit Stunden-Breakdown + Gesamtsumme.
+    """
+    def rate_fuer_minute(kum_min, z):
+        z_key = z if z in ("Z1","Z2","Z3","Z4","Z5") else "Z2"
+        for max_min, rates in PROGRESSIVE_CARBS_MATRIX:
+            if kum_min <= max_min:
+                return rates[z_key]
+        return PROGRESSIVE_CARBS_MATRIX[-1][1].get(z_key, 90)
+
+    # Bei Watt: Skalierungsfaktor aus Watt-Rate vs. Matrix-Stunde-1-Wert
+    z_key = zone if zone in ("Z1","Z2","Z3","Z4","Z5") else "Z2"
+    matrix_h1 = PROGRESSIVE_CARBS_MATRIX[0][1][z_key]  # Matrixwert Stunde 1
+    if carbs_pro_h_watt is not None and matrix_h1 > 0:
+        skalar = carbs_pro_h_watt / matrix_h1
+    else:
+        skalar = 1.0
+    # Deckel: Skalierung darf max 120 g/h erreichen, min 0
+    skalar = max(0.5, min(skalar, 120 / max(matrix_h1, 1)))
+
+    plan = []
+    total_min = dauer_h * 60
+    kum_min = 0.0
+    stunde = 1
+
+    while kum_min < total_min - 1e-6:
+        start_min = kum_min
+        end_min = min(kum_min + 60, total_min)
+        dauer_min = end_min - start_min
+        # Rate anhand Mittelpunkt der Stunde bestimmen
+        mid_kum = (start_min + end_min) / 2
+        basis_rate = rate_fuer_minute(mid_kum, zone)
+        rate = round(basis_rate * skalar)
+        # Absorptionsdeckel: 60 g/h Einzelquelle, 90 g/h Dual, 120 g/h Profi
+        rate = min(rate, 120)
+        carbs_g = round(rate * dauer_min / 60)
+        plan.append({
+            "stunde": stunde,
+            "start_min": round(start_min),
+            "end_min": round(end_min),
+            "dauer_min": round(dauer_min),
+            "carbs_g_h": rate,
+            "carbs_g": carbs_g,
+        })
+        kum_min += 60
+        stunde += 1
+
+    return plan
 
 def haversine_m(la1, lo1, la2, lo2):
     """Abstand in Metern zwischen zwei GPS-Koordinaten (Haversine-Formel)."""
@@ -423,7 +500,19 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
     else:
         carbs_pro_h = CARBS_PRO_STUNDE.get(zone, 60)
         carbs_quelle = f"Zone {zone}"
-    carbs_basis = round(carbs_pro_h * dauer_h)
+
+    # Progressive Carb-Plan berechnen (Zone × kumulierte Zeit)
+    # Nur bei >45 min sinnvoll; darunter flache Rate verwenden
+    if dauer_h >= 0.75:
+        watt_rate = carbs_pro_h if (watt and ftp) else None
+        prog_plan = berechne_progressive_carbs_plan(zone, dauer_h, carbs_pro_h_watt=watt_rate)
+        carbs_basis = sum(s["carbs_g"] for s in prog_plan)
+        carbs_pro_h_avg = round(carbs_basis / dauer_h, 1)
+    else:
+        prog_plan = []
+        carbs_basis = round(carbs_pro_h * dauer_h)
+        carbs_pro_h_avg = carbs_pro_h
+
     hm_bonus = round(hoehenmeter / 100 * HOEHENMETER_CARBS_BONUS_PRO_100HM) if hoehenmeter else 0
     carbs_gesamt = carbs_basis + hm_bonus
     if wasser_pro_h_override is not None:
@@ -475,9 +564,11 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
     return {
         "profil_name": profil["name"], "dauer_h": dauer_h, "zone": zone, "temp": temp,
         "watt": watt, "ftp": ftp, "hf": hf, "hr_max": profil.get("hr_max"),
-        "carbs": {"pro_h": carbs_pro_h, "gesamt": carbs_gesamt, "basis": carbs_basis,
+        "carbs": {"pro_h": carbs_pro_h, "pro_h_avg": carbs_pro_h_avg,
+                  "gesamt": carbs_gesamt, "basis": carbs_basis,
                   "hm_bonus": hm_bonus, "aus_gels": carbs_aus_gels,
-                  "aus_riegeln": carbs_aus_riegeln, "quelle": carbs_quelle},
+                  "aus_riegeln": carbs_aus_riegeln, "quelle": carbs_quelle,
+                  "progressiv": prog_plan},
         "wasser": {"pro_h": wasser_pro_h, "gesamt": wasser_gesamt, "aus_gels": wasser_aus_gels,
                    "zusaetzlich": wasser_zusaetzlich, "flaschen_kapazitaet_ml": flaschen_kapazitaet_ml,
                    "refill_ml": refill_ml},
@@ -887,7 +978,7 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
         f"Zone   : {e['zone']}  |  Dauer: {e['dauer_h']} h  |  Temp: {e['temp']} °C",
         "",
         "--- KOHLENHYDRATE ---",
-        f"Gesamt        : {e['carbs']['gesamt']} g  ({e['carbs']['pro_h']} g/h via {e['carbs']['quelle']})",
+        f"Gesamt        : {e['carbs']['gesamt']} g  (O {e['carbs']['pro_h_avg']} g/h progressiv via {e['carbs']['quelle']})",
         f"Basis         : {e['carbs']['basis']} g",
         f"HM-Bonus      : {e['carbs']['hm_bonus']} g",
         f"Aus Gels      : {e['carbs']['aus_gels']} g",
@@ -896,6 +987,15 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
     if sf_res.get("ratio_info"):
         ri = sf_res["ratio_info"]
         lines.append(f"Glukose:Frukt. : {ri[2]}")
+    # Progressiver Stundenplan im TXT
+    prog_txt = e["carbs"].get("progressiv", [])
+    if prog_txt and len(prog_txt) > 1:
+        lines.append("")
+        lines.append("  Progressiver Zeitplan (Stunde -> g/h -> Menge):")
+        for s in prog_txt:
+            label = (f"  {s['start_min']:>3}-{s['end_min']:>3} min"
+                     if s["dauer_min"] < 60 else f"  Stunde {s['stunde']:<2}      ")
+            lines.append(f"{label}  {s['carbs_g_h']:>3} g/h  ->  {s['carbs_g']:>3} g")
     lines.append("")
 
     lines += [
@@ -2261,7 +2361,8 @@ if st.session_state.ergebnis:
 
     # ── Kernkennzahlen ──
     cols = st.columns(4)
-    cols[0].metric("🍬 Carbs gesamt", f"{e['carbs']['gesamt']} g", f"{e['carbs']['pro_h']} g/h")
+    cols[0].metric("🍬 Carbs gesamt", f"{e['carbs']['gesamt']} g",
+                   f"Ø {e['carbs']['pro_h_avg']} g/h (progressiv)")
     cols[1].metric("💧 Wasser gesamt", f"{e['wasser']['gesamt']} ml", f"{e['wasser']['pro_h']} ml/h")
     cols[2].metric("⏱ Dauer", f"{e['dauer_h']} h")
     cols[3].metric("🌡 Temperatur", f"{e['temp']} °C")
@@ -2292,6 +2393,49 @@ if st.session_state.ergebnis:
                        help=f"+8 g pro 100 Hm Aufstieg")
         cols[2].metric("Davon Gels", f"{e['carbs']['aus_gels']} g")
         cols[3].metric("Davon Riegel", f"{e['carbs']['aus_riegeln']} g")
+
+    # ── Progressiver Stundenplan ──
+    prog = e["carbs"].get("progressiv", [])
+    if prog and len(prog) > 1:
+        with st.expander("📈 Progressiver Carb-Zeitplan (stündlich)", expanded=True):
+            st.caption(
+                "Die Carb-Empfehlung steigt über die Zeit, weil der Körper zunehmend auf "
+                "externe Zufuhr angewiesen ist: In Stunde 1 liefern Glykogenspeicher noch "
+                "viel Energie, ab Stunde 3+ sind sie weitgehend aufgebraucht. "
+                "*(Quellen: Jeukendrup 2014, Vøllestad & Blom 1985, Gonzalez & van Loon 2016)*"
+            )
+            # GI-Warnung bei Z4/Z5
+            if e["zone"] in ("Z4", "Z5"):
+                st.warning(
+                    "⚠️ **Z4/Z5 – GI-Paradox:** Bei hoher Intensität ist der Carb-Bedarf am "
+                    "höchsten, aber der Darmblutfluss sinkt um bis zu 70% → Absorption ist "
+                    "begrenzt. Deckel bleibt bei 90 g/h. Bevorzuge flüssige/Gel-Formen und "
+                    "isotonische Konzentration (4–6%). Carbs vor dem Hochintensitäts-Block "
+                    "vorladen statt während!"
+                )
+            # Tabelle
+            _max_rate = max(s["carbs_g_h"] for s in prog)
+            header_cols = st.columns([1, 1.5, 2, 3])
+            header_cols[0].markdown("**Stunde**")
+            header_cols[1].markdown("**g/h**")
+            header_cols[2].markdown("**Menge**")
+            header_cols[3].markdown("**Intensität**")
+            for s in prog:
+                row = st.columns([1, 1.5, 2, 3])
+                stunde_label = (f"{s['start_min']}–{s['end_min']} min"
+                                if s["dauer_min"] < 60
+                                else f"Stunde {s['stunde']}")
+                row[0].write(stunde_label)
+                row[1].write(f"**{s['carbs_g_h']} g/h**")
+                row[2].write(f"{s['carbs_g']} g")
+                # Balken-Visualisierung
+                pct = s["carbs_g_h"] / max(_max_rate, 1)
+                balken = "🟩" * int(pct * 8) + "⬜" * (8 - int(pct * 8))
+                row[3].write(balken)
+            st.markdown(
+                f"**Gesamt: {sum(s['carbs_g'] for s in prog)} g "
+                f"| Ø {e['carbs']['pro_h_avg']} g/h**"
+            )
 
     # ── Glykogen-Speicherbilanz ──
     with st.expander("🧬 Glykogen-Speicherbilanz", expanded=True):
