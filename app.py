@@ -2175,7 +2175,20 @@ if st.session_state.ergebnis:
         if e.get("watt") and e.get("ftp"):
             verbrauch_roh = berechne_carbs_pro_h_rohwert(e["watt"], e["ftp"])
         else:
+            # HF-Pfad: Zonenbasierter Schätzwert (max. 90 g/h in Tabelle).
+            # Verbrauch und geplante Zufuhr liegen nahe beieinander → Bilanz
+            # zeigt wenig Defizit, was für gleichmaessige Fahrten korrekt ist.
+            # Bei hoher Intensitaet oder Cardiac Drift kann der echte Verbrauch
+            # hoeher liegen – Watt-Eingabe mit NP waere praeziser.
             verbrauch_roh = e["carbs"]["pro_h"]
+            if e["dauer_h"] >= 3 or e["zone"] in ("Z4", "Z5"):
+                st.info(
+                    "ℹ️ **Hinweis zur Speicherbilanz:** Da du HF statt Watt eingegeben hast, "
+                    "basiert der Verbrauchswert auf dem Zonen-Durchschnitt (max. 90 g/h). "
+                    "Bei langen Fahrten (Cardiac Drift) oder hoher Intensitat (Z4/Z5) "
+                    "kann der echte Verbrauch hoeher liegen als hier angezeigt. "
+                    "Fuer genauere Ergebnisse: **Normalized Power (NP)** im Watt-Modus eingeben."
+                )
 
         # Zufuhr: planmäßig = was im Planner steht (carbs gesamt / dauer)
         zufuhr_default = round(e["carbs"]["gesamt"] / e["dauer_h"]) if e["dauer_h"] > 0 else 0
