@@ -1730,50 +1730,66 @@ sportmedizinische Beratung.
 *Cycling Fueling Planner – © 2024–2025 Felix Manasov – Alle Rechte vorbehalten*
 """)
 
-# ── GPX-Upload (AUSSERHALB des Formulars – funktioniert sonst nicht) ──────────
-st.subheader("1. Route")
-route_modus = st.radio(
-    "Wie möchtest du deine Route eingeben?",
-    ["Ohne GPX – Werte manuell eingeben", "GPX-Datei hochladen (von Komoot, Strava, Garmin …)"],
-    horizontal=False,
+# ── Trainingsmodus ────────────────────────────────────────────────────────────
+st.subheader("1. Trainingsmodus")
+trainings_modus = st.radio(
+    "Wo trainierst du?",
+    ["🚴 Outdoor (Straße / Gelände)", "🏠 Indoor (Rolle / Heimtrainer)"],
+    horizontal=True,
+    help="Im Indoor-Modus entfallen Route, Wetter und Frühstart – du gibst nur die Dauer an."
 )
-
-gpx_data = None
-
-if route_modus == "GPX-Datei hochladen (von Komoot, Strava, Garmin …)":
-    st.caption(
-        "Exportiere deine Route als GPX-Datei aus Komoot, Strava, Garmin Connect oder RideWithGPS "
-        "und lade sie hier hoch. Distanz, Höhenmeter und Startkoordinaten werden automatisch ausgelesen."
-    )
-    uploaded_file = st.file_uploader(
-        "GPX-Datei auswählen", type=["gpx"],
-        help="Dateiformat: .gpx – kann aus den meisten Radsport-Apps exportiert werden"
-    )
-    if uploaded_file is not None:
-        gpx_bytes = uploaded_file.read()
-        gpx_data = parse_gpx(gpx_bytes)
-        if gpx_data:
-            st.success(
-                f"✅ **{gpx_data['name']}** geladen – "
-                f"{gpx_data['distanz_km']} km | {gpx_data['hoehenmeter_auf']} Hm aufwärts"
-            )
-            st.session_state.gpx_data = gpx_data
-        else:
-            st.error("❌ Die GPX-Datei konnte nicht gelesen werden. Bitte eine gültige .gpx-Datei hochladen.")
-            st.session_state.gpx_data = None
-    elif st.session_state.gpx_data:
-        gpx_data = st.session_state.gpx_data
-        st.info(f"GPX geladen: **{gpx_data['name']}** – {gpx_data['distanz_km']} km | {gpx_data['hoehenmeter_auf']} Hm")
-else:
-    st.session_state.gpx_data = None
+ist_indoor = trainings_modus.startswith("🏠")
 
 st.divider()
+
+# ── GPX-Upload – nur Outdoor ──────────────────────────────────────────────────
+gpx_data = None
+
+if not ist_indoor:
+    st.subheader("2. Route")
+    route_modus = st.radio(
+        "Wie möchtest du deine Route eingeben?",
+        ["Ohne GPX – Werte manuell eingeben", "GPX-Datei hochladen (von Komoot, Strava, Garmin …)"],
+        horizontal=False,
+    )
+
+    if route_modus == "GPX-Datei hochladen (von Komoot, Strava, Garmin …)":
+        st.caption(
+            "Exportiere deine Route als GPX-Datei aus Komoot, Strava, Garmin Connect oder RideWithGPS "
+            "und lade sie hier hoch. Distanz, Höhenmeter und Startkoordinaten werden automatisch ausgelesen."
+        )
+        uploaded_file = st.file_uploader(
+            "GPX-Datei auswählen", type=["gpx"],
+            help="Dateiformat: .gpx – kann aus den meisten Radsport-Apps exportiert werden"
+        )
+        if uploaded_file is not None:
+            gpx_bytes = uploaded_file.read()
+            gpx_data = parse_gpx(gpx_bytes)
+            if gpx_data:
+                st.success(
+                    f"✅ **{gpx_data['name']}** geladen – "
+                    f"{gpx_data['distanz_km']} km | {gpx_data['hoehenmeter_auf']} Hm aufwärts"
+                )
+                st.session_state.gpx_data = gpx_data
+            else:
+                st.error("❌ Die GPX-Datei konnte nicht gelesen werden. Bitte eine gültige .gpx-Datei hochladen.")
+                st.session_state.gpx_data = None
+        elif st.session_state.gpx_data:
+            gpx_data = st.session_state.gpx_data
+            st.info(f"GPX geladen: **{gpx_data['name']}** – {gpx_data['distanz_km']} km | {gpx_data['hoehenmeter_auf']} Hm")
+    else:
+        st.session_state.gpx_data = None
+
+    st.divider()
+else:
+    st.session_state.gpx_data = None
+    st.info("🏠 **Indoor-Modus:** Gib unten nur die Trainingsdauer ein – Wetter, Route und Frühstart werden automatisch ausgeblendet.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. TRAININGSINTENSITÄT – außerhalb des Formulars (Mix-Builder braucht Buttons)
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.subheader("2. Trainingsintensität")
+st.subheader("3. Trainingsintensität" if not ist_indoor else "2. Trainingsintensität")
 
 intensitaet_optionen = ["Zone manuell wählen", "Nach Wattleistung", "Nach Herzfrequenz"]
 if not profil["hr_max"]:
@@ -1990,92 +2006,109 @@ st.divider()
 # ── Hauptformular ─────────────────────────────────────────────────────────────
 with st.form("planungsformular"):
 
-    # Route-Details
-    if gpx_data:
-        distanz_km = gpx_data["distanz_km"]
-        hoehenmeter = gpx_data["hoehenmeter_auf"]
-        lat_default = gpx_data["start_lat"]
-        lon_default = gpx_data["start_lon"]
-        st.info(f"📍 Route: **{gpx_data['name']}** | {distanz_km} km | {hoehenmeter} Hm | "
-                f"Start: {lat_default:.4f}° N, {lon_default:.4f}° O")
-    else:
-        st.subheader("Streckendaten")
-        cols = st.columns(2)
-        distanz_km = cols[0].number_input("Distanz (km)", 0.0, 500.0, 80.0, step=5.0)
-        hoehenmeter = cols[1].number_input("Höhenmeter aufwärts (m)", 0, 8000, 800, step=100)
-        lat_default, lon_default = 51.0, 10.0
+    # Route-Details (nur Outdoor)
+    distanz_km = None
+    hoehenmeter = None
+    lat_default, lon_default = 51.0, 10.0
+
+    if not ist_indoor:
+        if gpx_data:
+            distanz_km = gpx_data["distanz_km"]
+            hoehenmeter = gpx_data["hoehenmeter_auf"]
+            lat_default = gpx_data["start_lat"]
+            lon_default = gpx_data["start_lon"]
+            st.info(f"📍 Route: **{gpx_data['name']}** | {distanz_km} km | {hoehenmeter} Hm | "
+                    f"Start: {lat_default:.4f}° N, {lon_default:.4f}° O")
+        else:
+            st.subheader("Streckendaten")
+            cols = st.columns(2)
+            distanz_km = cols[0].number_input("Distanz (km)", 0.0, 500.0, 80.0, step=5.0)
+            hoehenmeter = cols[1].number_input("Höhenmeter aufwärts (m)", 0, 8000, 800, step=100)
 
     # ── Dauer ────────────────────────────────────────────────────────────────
-    st.subheader("3. Trainingsdauer")
+    st.subheader("4. Trainingsdauer" if not ist_indoor else "3. Trainingsdauer")
     dauer_schaetzung = None
-    if distanz_km and hoehenmeter is not None:
+    if not ist_indoor and distanz_km and hoehenmeter is not None:
         dauer_schaetzung = schaetze_dauer(float(distanz_km), float(hoehenmeter), zone if zone != "Mix" else "Z2")
     dauer_h = st.number_input(
         "Trainingsdauer in Stunden",
         min_value=0.5, max_value=24.0,
-        value=float(dauer_schaetzung) if dauer_schaetzung else 3.0,
+        value=float(dauer_schaetzung) if dauer_schaetzung else 1.0 if ist_indoor else 3.0,
         step=0.25,
     )
     if dauer_schaetzung:
         st.caption(f"💡 Geschätzte Dauer aus Strecke + Höhenmetern: **{dauer_schaetzung} h**")
 
-    # ── Wetter ───────────────────────────────────────────────────────────────
-    st.subheader("4. Wetter")
-    cols = st.columns(2)
-    datum = cols[0].date_input("Trainingsdatum", value=datetime.today() + timedelta(days=1))
-    start_h = cols[1].slider("Startzeit (Uhr)", 0, 23, 9)
+    # ── Wetter (nur Outdoor) ─────────────────────────────────────────────────
+    temp_manuell = 20
+    sonne_manuell = "keine"
+    indoor = ist_indoor
+    wetter_auto = False
+    lat, lon = lat_default, lon_default
+    start_h = 9
+    datum = datetime.today() + timedelta(days=1)
+    frueh_start = False
 
-    wetter_auto = st.checkbox(
-        "🌤 Wetter automatisch abrufen (Open-Meteo API, kostenlos)",
-        value=True,
-        help="Ruft Temperatur, Wind, Sonne und Regen für dein Trainingsgebiet ab. "
-             "Funktioniert nur mit Internetverbindung."
-    )
+    if not ist_indoor:
+        st.subheader("5. Wetter")
+        cols = st.columns(2)
+        datum = cols[0].date_input("Trainingsdatum", value=datetime.today() + timedelta(days=1))
+        start_h = cols[1].slider("Startzeit (Uhr)", 0, 23, 9)
 
-    temp_manuell = 18
-    sonne_manuell = "mittel"
-    indoor = False
+        wetter_auto = st.checkbox(
+            "🌤 Wetter automatisch abrufen (Open-Meteo API, kostenlos)",
+            value=True,
+            help="Ruft Temperatur, Wind, Sonne und Regen für dein Trainingsgebiet ab. "
+                 "Funktioniert nur mit Internetverbindung."
+        )
 
-    if wetter_auto:
-        if gpx_data:
-            st.caption(f"📍 Wetterstandort: Startpunkt der GPX-Route ({gpx_data['start_lat']:.3f}°N, {gpx_data['start_lon']:.3f}°O) – automatisch übernommen.")
-            lat = gpx_data["start_lat"]
-            lon = gpx_data["start_lon"]
+        sonne_manuell = "mittel"
+        temp_manuell = 18
+
+        if wetter_auto:
+            if gpx_data:
+                st.caption(f"📍 Wetterstandort: Startpunkt der GPX-Route ({gpx_data['start_lat']:.3f}°N, {gpx_data['start_lon']:.3f}°O) – automatisch übernommen.")
+                lat = gpx_data["start_lat"]
+                lon = gpx_data["start_lon"]
+            else:
+                with st.expander("📍 Standort für Wettervorhersage anpassen (optional)", expanded=False):
+                    st.caption(
+                        "Hier kannst du den Startort deines Trainings eingeben, damit die Wettervorhersage "
+                        "stimmt. Die Koordinaten findest du z.B. bei Google Maps (Rechtsklick auf den Startpunkt).\n\n"
+                        "**Beispiele:** München: 48.14, 11.58 | Berlin: 52.52, 13.40 | Hamburg: 53.55, 10.00 | "
+                        "Wien: 48.21, 16.37 | Zürich: 47.38, 8.54"
+                    )
+                    cols = st.columns(2)
+                    lat = cols[0].number_input("Breitengrad (z.B. 48.14 für München)", -90.0, 90.0, 51.0, format="%.4f")
+                    lon = cols[1].number_input("Längengrad (z.B. 11.58 für München)", -180.0, 180.0, 10.0, format="%.4f")
+                    st.caption(f"Gewählter Standort: {lat:.3f}° N, {lon:.3f}° O")
         else:
-            with st.expander("📍 Standort für Wettervorhersage anpassen (optional)", expanded=False):
-                st.caption(
-                    "Hier kannst du den Startort deines Trainings eingeben, damit die Wettervorhersage "
-                    "stimmt. Die Koordinaten findest du z.B. bei Google Maps (Rechtsklick auf den Startpunkt).\n\n"
-                    "**Beispiele:** München: 48.14, 11.58 | Berlin: 52.52, 13.40 | Hamburg: 53.55, 10.00 | "
-                    "Wien: 48.21, 16.37 | Zürich: 47.38, 8.54"
-                )
-                cols = st.columns(2)
-                lat = cols[0].number_input("Breitengrad (z.B. 48.14 für München)", -90.0, 90.0, 51.0, format="%.4f")
-                lon = cols[1].number_input("Längengrad (z.B. 11.58 für München)", -180.0, 180.0, 10.0, format="%.4f")
-                st.caption(f"Gewählter Standort: {lat:.3f}° N, {lon:.3f}° O")
-    else:
-        lat, lon = lat_default, lon_default
-        st.caption("Manuelle Eingabe der Wetterbedingungen:")
-        cols = st.columns(3)
-        temp_manuell = cols[0].slider("Temperatur (°C)", -10, 45, 18)
-        sonne_manuell = cols[1].selectbox(
-            "Sonneneinstrahlung", ["keine", "mittel", "stark"], index=1,
-            format_func=lambda x: {"keine": "☁️ Keine Sonne", "mittel": "⛅ Teils sonnig", "stark": "☀️ Vollsonne"}[x]
-        )
-        indoor = cols[2].checkbox(
-            "Indoor-Training",
-            help="Heimtrainer/Rolle: kein Fahrtwind → mehr Schwitzen (+30%). "
-                 "Auch bei offener Garage oder Keller aktivieren, wenn kein Fahrtwind vorhanden."
-        )
+            lat, lon = lat_default, lon_default
+            st.caption("Manuelle Eingabe der Wetterbedingungen:")
+            cols = st.columns(2)
+            temp_manuell = cols[0].slider("Temperatur (°C)", -10, 45, 18)
+            sonne_manuell = cols[1].selectbox(
+                "Sonneneinstrahlung", ["keine", "mittel", "stark"], index=1,
+                format_func=lambda x: {"keine": "☁️ Keine Sonne", "mittel": "⛅ Teils sonnig", "stark": "☀️ Vollsonne"}[x]
+            )
 
-    # ── Bedingungen ──────────────────────────────────────────────────────────
-    st.subheader("5. Weitere Bedingungen")
-    frueh_start = st.checkbox(
-        "Frühstart (Beginn vor 8 Uhr morgens)",
-        value=(start_h < 8),
-        help="Bei frühem Start ist es kühler und die Sonne steht tiefer. "
-             "Das reduziert die berechnete Trinkmenge leicht (Faktor ×0,9)."
-    )
+        # ── Bedingungen ──────────────────────────────────────────────────────
+        st.subheader("6. Weitere Bedingungen")
+        frueh_start = st.checkbox(
+            "Frühstart (Beginn vor 8 Uhr morgens)",
+            value=(start_h < 8),
+            help="Bei frühem Start ist es kühler und die Sonne steht tiefer. "
+                 "Das reduziert die berechnete Trinkmenge leicht (Faktor ×0,9)."
+        )
+    else:
+        # Indoor: nur Raumtemperatur
+        st.subheader("4. Raumtemperatur")
+        temp_manuell = st.slider(
+            "Temperatur im Trainingsraum (°C)", 10, 40, 20,
+            help="Die Raumtemperatur beeinflusst die Schweißrate. "
+                 "Typisch: Keller ~15 °C, Wohnzimmer ~20 °C, schlecht belüftet ~25–30 °C."
+        )
+        st.caption("🌬️ Kein Fahrtwind beim Indoor-Training → Schweißrate wird automatisch um +30% erhöht.")
 
     # ── Submit ───────────────────────────────────────────────────────────────
     submitted = st.form_submit_button("🚀 Plan berechnen", use_container_width=True, type="primary")
@@ -2585,7 +2618,7 @@ genauer als die Pauschalrechnung.
     braucht_carbs = (_kapazitaet_g > 0 and _aktive_r and
                      e["carbs"]["aus_riegeln"] > _kapazitaet_g)
 
-    if braucht_wasser or braucht_carbs:
+    if not ist_indoor and (braucht_wasser or braucht_carbs):
         with st.expander("📍 Resupply-Stopps entlang der Route", expanded=True):
             # Kurze Zusammenfassung was gebraucht wird
             summary_parts = []
