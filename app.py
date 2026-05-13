@@ -18,6 +18,26 @@ CARB_ANTEIL_NACH_PCT_FTP = [(0.55, 0.35), (0.75, 0.50), (0.90, 0.72), (1.05, 0.8
 WIRKUNGSGRAD = 0.22
 HOEHENMETER_CARBS_BONUS_PRO_100HM = 8
 AUFFUELL_BUFFER_PCT = 0.82
+
+# ── Glykogen-Speicher (g pro kg Körpergewicht) ────────────────────────────────
+# Basis: Muskelglykogen (~80%) + Leberglykogen (~20%).
+# Quellen: Jeukendrup & Gleeson (2010), Burke (2015), Hawley & Leckey (2015).
+# Werte konservativ in der Mitte typischer Messbereiche.
+GLYKOGEN_SPEICHER_G_PRO_KG = {
+    "untrained": 6.0,          # ~450 g bei 75 kg
+    "trained": 8.0,            # ~600 g bei 75 kg – Standard für Hobby-Ausdauersportler
+    "trained_loaded": 11.0,    # ~825 g bei 75 kg – nach 2–3 Tagen Carbo-Loading
+    "elite_loaded": 13.0,      # ~975 g bei 75 kg – Elite + Loading
+}
+# Performance-Schwellen (% Speicher-Rest)
+GLYKOGEN_ZONEN = [
+    (0.70, "optimal", "🟢"),    # >70%: voll leistungsfähig
+    (0.50, "gut", "🟢"),         # 50–70%: noch alles ok
+    (0.30, "achtung", "🟡"),     # 30–50%: erste Leistungsabfälle möglich
+    (0.15, "kritisch", "🟠"),    # 15–30%: spürbare Schwäche, Substratverschiebung
+    (0.00, "hungerast", "🔴"),   # <15%: akute Bonk-Gefahr
+]
+
 POI_SUCHRADIUS_M = 3000
 POI_TYP_NAMEN = {
     "fuel": "Tankstelle", "supermarket": "Supermarkt", "convenience": "Kiosk",
@@ -35,6 +55,8 @@ DEFAULT_PROFIL = {
     "hr_max": None,
     "geschlecht": "Männlich",
     "alter": 30,
+    "koerpergewicht_kg": 75,
+    "trainings_status": "trained",
     "schweissrate": {
         "preset": "mittel",
         "kalibriert_ml_h": [[10, 250], [15, 300], [20, 350], [25, 450], [99, 600]],
@@ -98,6 +120,158 @@ def berechne_carbs_pro_h_aus_watt(watt, ftp):
             carb_anteil = anteil
             break
     return round(min((kcal_pro_h * carb_anteil) / 4.0, 120))
+
+
+def berechne_carbs_pro_h_rohwert(watt, ftp):
+    """
+    Wie berechne_carbs_pro_h_aus_watt, aber OHNE den 120-g-Cap.
+    Das ist der echte physiologische Verbrauch – der Cap gilt nur für die
+    Zufuhr (Darmabsorption), nicht für den Verbrauch.
+    """
+    pct_ftp = watt / ftp
+    kcal_pro_h = (watt * 3600) / (4180 * WIRKUNGSGRAD)
+    carb_anteil = 0.50
+    for grenze, anteil in CARB_ANTEIL_NACH_PCT_FTP:
+        if pct_ftp <= grenze:
+            carb_anteil = anteil
+            break
+    return round((kcal_pro_h * carb_anteil) / 4.0)
+
+
+def speicher_zone(prozent):
+    """Liefert (status, emoji) für einen Speicher-Rest in Prozent (0..1)."""
+    for schwelle, name, emoji in GLYKOGEN_ZONEN:
+        if prozent >= schwelle:
+            return name, emoji
+    return "hungerast", "🔴"
+
+
+def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
+                             hm_bonus_g=0, start_voll_pct=1.0):
+    """
+    Berechnet die kumulative Glykogen-Speicherbilanz stundenweise.
+
+    Args:
+        profil: Nutzerprofil (für Körpergewicht & Trainingsstatus)
+        dauer_h: Gesamtdauer in Stunden (float)
+        verbrauch_pro_h: physiologischer KH-Verbrauch in g/h
+        zufuhr_pro_h: tatsächliche KH-Zufuhr in g/h (gut-limitiert, typ. 60–120)
+        hm_bonus_g: zusätzlicher KH-Verbrauch aus Höhenmetern (gesamt, wird verteilt)
+        start_voll_pct: Speicherfüllstand zu Beginn (0..1), z.B. 1.0=voll, 0.8=nicht ideal geladen
+
+    Returns:
+        dict mit Start-Speicher, stundenweisem Verlauf, kritischer Stunde, Empfehlungen.
+    """
+    gewicht = profil.get("koerpergewicht_kg", 75)
+    status = profil.get("trainings_status", "trained")
+    g_pro_kg = GLYKOGEN_SPEICHER_G_PRO_KG.get(status, 8.0)
+    speicher_voll_g = round(gewicht * g_pro_kg)
+    speicher_start_g = round(speicher_voll_g * start_voll_pct)
+
+    # HM-Bonus gleichmäßig über die Dauer verteilen
+    hm_bonus_pro_h = hm_bonus_g / dauer_h if dauer_h > 0 else 0
+    verbrauch_eff = verbrauch_pro_h + hm_bonus_pro_h
+
+    # Stundenweise Bilanz (volle Stunden + ggf. Reststunde)
+    stunden_liste = []
+    speicher_rest = speicher_start_g
+    kritische_stunde = None
+
+    # Wir rechnen in 1h-Schritten; letzte Stunde ggf. anteilig
+    h = 0.0
+    while h < dauer_h - 1e-6:
+        schritt = min(1.0, dauer_h - h)
+        verbrauch_h = verbrauch_eff * schritt
+        zufuhr_h = zufuhr_pro_h * schritt
+        defizit_h = verbrauch_h - zufuhr_h
+        speicher_rest -= defizit_h
+        # Speicher kann nicht über 100% gehen (Überzufuhr wird oxidiert, nicht eingelagert)
+        speicher_rest = max(0, min(speicher_voll_g, speicher_rest))
+        rest_pct = speicher_rest / speicher_voll_g if speicher_voll_g > 0 else 0
+        zone_name, zone_emoji = speicher_zone(rest_pct)
+        h_end = h + schritt
+        stunden_liste.append({
+            "stunde_bis": round(h_end, 2),
+            "verbrauch_g": round(verbrauch_h, 1),
+            "zufuhr_g": round(zufuhr_h, 1),
+            "defizit_g": round(defizit_h, 1),
+            "speicher_rest_g": round(speicher_rest),
+            "speicher_rest_pct": round(rest_pct * 100, 1),
+            "zone": zone_name,
+            "emoji": zone_emoji,
+        })
+        if kritische_stunde is None and rest_pct < 0.30:
+            kritische_stunde = round(h_end, 2)
+        h = h_end
+
+    # End-Status und Empfehlungen
+    end_speicher_g = stunden_liste[-1]["speicher_rest_g"] if stunden_liste else speicher_start_g
+    end_pct = stunden_liste[-1]["speicher_rest_pct"] if stunden_liste else 100.0
+    gesamt_verbrauch = sum(s["verbrauch_g"] for s in stunden_liste)
+    gesamt_zufuhr = sum(s["zufuhr_g"] for s in stunden_liste)
+    gesamt_defizit = gesamt_verbrauch - gesamt_zufuhr
+
+    # Empfehlung: notwendige Zufuhr für kein Defizit
+    zufuhr_noetig_pro_h = (verbrauch_eff - (speicher_voll_g * 0.35) / dauer_h) if dauer_h > 0 else 0
+    # ↑ Erlaubt 65% Speicher-Verbrauch über die Dauer (typische sichere Reserve)
+    zufuhr_noetig_pro_h = max(0, round(zufuhr_noetig_pro_h))
+
+    empfehlungen = []
+    if end_pct < 15:
+        empfehlungen.append(
+            f"⛔ **Hungerast-Risiko!** Speicher wären am Ende bei {end_pct:.0f}%. "
+            f"Zufuhr unbedingt auf min. {min(120, zufuhr_noetig_pro_h)} g/h erhöhen, "
+            "oder Intensität reduzieren, oder Strecke verkürzen."
+        )
+    elif end_pct < 30:
+        empfehlungen.append(
+            f"⚠️ **Kritisch:** Speicher am Ende bei {end_pct:.0f}%. Plan funktioniert, "
+            "aber wenig Reserve. Letzte Stunde wird hart, Antritte vermeiden."
+        )
+    elif end_pct < 50:
+        empfehlungen.append(
+            f"🟡 **Eng kalkuliert:** Speicher am Ende bei {end_pct:.0f}%. "
+            "Geht gut auf, aber Pacing & Fueling konsequent durchhalten."
+        )
+    else:
+        empfehlungen.append(
+            f"✅ **Komfortabel:** Speicher am Ende bei {end_pct:.0f}%. "
+            "Plan hat Puffer – auch bei leichten Intensitätsschwankungen sicher."
+        )
+
+    if zufuhr_pro_h < verbrauch_eff - 30 and dauer_h > 3:
+        defizit_pro_h = verbrauch_eff - zufuhr_pro_h
+        empfehlungen.append(
+            f"📉 Pro Stunde {defizit_pro_h:.0f} g Defizit aus Speichern. "
+            f"Speicher schmilzt um ~{(defizit_pro_h/speicher_voll_g)*100:.1f}% pro Stunde."
+        )
+
+    if zufuhr_pro_h > 100:
+        empfehlungen.append(
+            f"💡 Zufuhr von {zufuhr_pro_h} g/h ist hoch – Glukose:Fructose 1:0.8 "
+            "und Training des Darms (Gut Training) sind Voraussetzung."
+        )
+
+    return {
+        "koerpergewicht_kg": gewicht,
+        "trainings_status": status,
+        "g_pro_kg": g_pro_kg,
+        "speicher_voll_g": speicher_voll_g,
+        "speicher_start_g": speicher_start_g,
+        "speicher_end_g": end_speicher_g,
+        "speicher_end_pct": end_pct,
+        "verbrauch_eff_pro_h": round(verbrauch_eff, 1),
+        "zufuhr_pro_h": zufuhr_pro_h,
+        "defizit_pro_h": round(verbrauch_eff - zufuhr_pro_h, 1),
+        "gesamt_verbrauch_g": round(gesamt_verbrauch),
+        "gesamt_zufuhr_g": round(gesamt_zufuhr),
+        "gesamt_defizit_g": round(gesamt_defizit),
+        "kritische_stunde": kritische_stunde,
+        "stunden": stunden_liste,
+        "empfehlungen": empfehlungen,
+        "zufuhr_empfohlen_pro_h": zufuhr_noetig_pro_h,
+    }
+
 
 def get_schweissrate_ml_h(profil, temp):
     preset = profil["schweissrate"]["preset"]
@@ -1161,6 +1335,43 @@ with st.sidebar:
         ),
     )
 
+    # ── Körpergewicht & Trainingsstatus (für Glykogen-Bilanz) ──
+    cols_kg = st.columns(2)
+    profil["koerpergewicht_kg"] = cols_kg[0].number_input(
+        "Körpergewicht (kg)",
+        min_value=40, max_value=150,
+        value=int(profil.get("koerpergewicht_kg", 75)), step=1,
+        help=(
+            "Dein Körpergewicht in kg. Wird für die Glykogen-Speicherbilanz benötigt: "
+            "pro kg Körpergewicht speicherst du je nach Trainingsstatus 6–13 g Kohlenhydrate "
+            "als Glykogen (Muskel + Leber). Hat KEINEN Einfluss auf Schweißrate oder "
+            "Kohlenhydratbedarf in der bestehenden Berechnung."
+        ),
+    )
+    trainings_optionen = {
+        "untrained": "Untrainiert (Hobby, <3h/Woche) – ~6 g/kg",
+        "trained": "Trainiert (Standard) – ~8 g/kg",
+        "trained_loaded": "Trainiert + Carbo-Loading (2–3 Tage geladen) – ~11 g/kg",
+        "elite_loaded": "Elite + Loading – ~13 g/kg",
+    }
+    aktueller_status = profil.get("trainings_status", "trained")
+    if aktueller_status not in trainings_optionen:
+        aktueller_status = "trained"
+    profil["trainings_status"] = cols_kg[1].selectbox(
+        "Trainingsstatus (Glykogenspeicher)",
+        list(trainings_optionen.keys()),
+        index=list(trainings_optionen.keys()).index(aktueller_status),
+        format_func=lambda k: trainings_optionen[k],
+        help=(
+            "Bestimmt die Größe deines Glykogenspeichers:\n"
+            "• **Untrainiert:** ~6 g/kg Körpergewicht\n"
+            "• **Trainiert:** ~8 g/kg (Hobby-Ausdauer regelmäßig)\n"
+            "• **Trainiert + geladen:** ~11 g/kg (2–3 Tage gezieltes Carbo-Loading vor dem Event)\n"
+            "• **Elite + geladen:** ~13 g/kg (Profi-Ausdauer)\n\n"
+            "Quellen: Jeukendrup & Gleeson (2010), Burke (2015)."
+        ),
+    )
+
     st.divider()
 
     # ── Schweißrate ──
@@ -1925,6 +2136,149 @@ if st.session_state.ergebnis:
                        help=f"+8 g pro 100 Hm Aufstieg")
         cols[2].metric("Davon Gels", f"{e['carbs']['aus_gels']} g")
         cols[3].metric("Davon Riegel", f"{e['carbs']['aus_riegeln']} g")
+
+    # ── Glykogen-Speicherbilanz ──
+    with st.expander("🧬 Glykogen-Speicherbilanz", expanded=True):
+        st.caption(
+            "Zeigt, wie sich deine Glykogenspeicher über die Dauer entwickeln. "
+            "Verbrauch über die geplante Zufuhr hinaus wird aus den Speichern gedeckt. "
+            "Bei <30 % Speicherrest steigt das Risiko spürbarer Leistungseinbrüche."
+        )
+
+        # Verbrauch ohne 120-g-Cap (echter physiologischer Wert)
+        if e.get("watt") and e.get("ftp"):
+            verbrauch_roh = berechne_carbs_pro_h_rohwert(e["watt"], e["ftp"])
+        else:
+            verbrauch_roh = e["carbs"]["pro_h"]
+
+        # Zufuhr: planmäßig = was im Planner steht (carbs gesamt / dauer)
+        zufuhr_default = round(e["carbs"]["gesamt"] / e["dauer_h"]) if e["dauer_h"] > 0 else 0
+        zufuhr_default = min(120, zufuhr_default)
+
+        col_in1, col_in2 = st.columns(2)
+        zufuhr_pro_h = col_in1.slider(
+            "Realistische Zufuhr (g/h)",
+            min_value=30, max_value=120,
+            value=int(zufuhr_default), step=5,
+            help=(
+                "Was du tatsächlich pro Stunde aufnehmen kannst. Typischer Bereich: "
+                "60–90 g/h ohne Gut-Training, bis 120 g/h mit Glucose:Fructose-Mix "
+                "und trainiertem Darm. Standardwert = was der Plan vorsieht."
+            ),
+        )
+        start_voll_pct = col_in2.slider(
+            "Speicher-Füllstand am Start (%)",
+            min_value=50, max_value=100,
+            value=100, step=5,
+            help=(
+                "100 % = perfekt vorbereitet (Carbo-Loading 2–3 Tage, Frühstücks-KH). "
+                "80–90 % = normal gegessen, kein Loading. "
+                "60–70 % = nüchterner Start oder schlecht erholt."
+            ),
+        ) / 100.0
+
+        bilanz = berechne_glykogen_bilanz(
+            profil=profil,
+            dauer_h=e["dauer_h"],
+            verbrauch_pro_h=verbrauch_roh,
+            zufuhr_pro_h=zufuhr_pro_h,
+            hm_bonus_g=e["carbs"]["hm_bonus"],
+            start_voll_pct=start_voll_pct,
+        )
+
+        # Kernmetriken
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "Speicher voll",
+            f"{bilanz['speicher_voll_g']} g",
+            help=f"{bilanz['koerpergewicht_kg']} kg × {bilanz['g_pro_kg']} g/kg "
+                 f"({bilanz['trainings_status']})",
+        )
+        c2.metric(
+            "Verbrauch (echt)",
+            f"{bilanz['verbrauch_eff_pro_h']:.0f} g/h",
+            help="Physiologischer KH-Verbrauch ohne 120-g-Aufnahme-Cap. "
+                 "Inkl. anteiliger HM-Bonus.",
+        )
+        defizit_pro_h = bilanz["defizit_pro_h"]
+        c3.metric(
+            "Defizit/h",
+            f"{defizit_pro_h:+.0f} g/h",
+            delta=f"{-defizit_pro_h:.0f} g aus Speicher" if defizit_pro_h > 0 else "deckungsgleich",
+            delta_color="inverse" if defizit_pro_h > 0 else "off",
+        )
+        end_pct = bilanz["speicher_end_pct"]
+        _, end_emoji = speicher_zone(end_pct / 100)
+        c4.metric(
+            "Speicher am Ende",
+            f"{end_emoji} {end_pct:.0f} %",
+            f"{bilanz['speicher_end_g']} g",
+            delta_color="off",
+        )
+
+        # Verlaufstabelle
+        st.markdown("**Stundenweiser Verlauf**")
+        stunden = bilanz["stunden"]
+        st.table({
+            "Bis Stunde": [f"{s['stunde_bis']:.1f} h" for s in stunden],
+            "Verbrauch": [f"{s['verbrauch_g']:.0f} g" for s in stunden],
+            "Zufuhr": [f"{s['zufuhr_g']:.0f} g" for s in stunden],
+            "Defizit": [f"{s['defizit_g']:+.0f} g" for s in stunden],
+            "Speicher": [f"{s['speicher_rest_g']} g" for s in stunden],
+            "Rest %": [f"{s['emoji']} {s['speicher_rest_pct']:.0f} %" for s in stunden],
+        })
+
+        # Diagramm: Speicherverlauf über Zeit
+        chart_data = {
+            "Stunde": [0] + [s["stunde_bis"] for s in stunden],
+            "Speicher (g)": [bilanz["speicher_start_g"]] + [s["speicher_rest_g"] for s in stunden],
+        }
+        try:
+            import pandas as pd
+            df_chart = pd.DataFrame(chart_data).set_index("Stunde")
+            st.line_chart(df_chart, height=240)
+        except ImportError:
+            pass
+
+        # Kritische Stunde
+        if bilanz["kritische_stunde"] is not None:
+            st.warning(
+                f"⚠️ Kritischer Bereich (<30 % Speicher) erreicht bei Stunde "
+                f"**{bilanz['kritische_stunde']:.1f} h**."
+            )
+
+        # Empfehlungen
+        for emp in bilanz["empfehlungen"]:
+            st.markdown(emp)
+
+        with st.popover("ℹ️ Wie wird gerechnet?"):
+            st.markdown(
+                f"""
+**Speichergröße:** {bilanz['koerpergewicht_kg']} kg × {bilanz['g_pro_kg']} g/kg
+= **{bilanz['speicher_voll_g']} g** Glykogen total (Muskel + Leber).
+
+**Verbrauch pro Stunde:** Aus Watt × Wirkungsgrad und KH-Anteil je % FTP
+(siehe Energie-Sektion), aber OHNE den 120-g-Aufnahme-Cap – der Körper
+verbrennt, was er verbrennt, unabhängig davon, was du nachschieben kannst.
+
+**Defizit:** Verbrauch − Zufuhr. Das Defizit kommt aus den Speichern.
+Kumuliert ergibt das den Speicherstand zu jeder Stunde.
+
+**Zonen (% Speicher-Rest):**
+- 🟢 >50 %: voll leistungsfähig
+- 🟡 30–50 %: erste Leistungsabfälle möglich, Pacing wichtig
+- 🟠 15–30 %: spürbare Schwäche, Substratverschiebung Richtung Fett
+- 🔴 <15 %: akute Hungerast-Gefahr
+
+**Quellen:** Jeukendrup & Gleeson (2010), Burke (2015), Hawley & Leckey (2015).
+
+**Limitationen:** Das Modell rechnet linear und ignoriert die natürliche
+Glykogen-Sparwirkung bei längeren Belastungen (Substratverschiebung zu Fett
+mit der Dauer). Es ist eher konservativ – im Zweifel hast du etwas mehr Reserve
+als angezeigt. Bei sehr variabler Intensität (Bergetappen) ist der Mix-Modus
+genauer als die Pauschalrechnung.
+"""
+            )
 
     # ── Softflasks ──
     with st.expander("🧴 Softflasks / Gel-Mischung", expanded=True):
