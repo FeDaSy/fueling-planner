@@ -1339,6 +1339,15 @@ profil = st.session_state.profil
 with st.sidebar:
     st.title("⚙️ Mein Profil")
 
+    # ── Feedback ──
+    st.markdown("### 💬 Feedback & Support")
+    st.markdown(
+        "Fehler entdeckt, Frage oder Verbesserungsidee?\n\n"
+        "[![Feedback geben](https://img.shields.io/badge/Feedback%20geben-%E2%86%92-blue?style=for-the-badge)]"
+        "(https://forms.gle/xrj1fAKduJtJYy5B7)"
+    )
+    st.markdown("---")
+
     # ── Name ──
     profil["name"] = st.text_input("Name", value=profil["name"])
 
