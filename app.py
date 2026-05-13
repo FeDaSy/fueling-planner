@@ -981,10 +981,23 @@ def schaetze_dauer(distanz_km, hoehenmeter, zone="Z2"):
     v = {"Z1": 22, "Z2": 24, "Z3": 28, "Z4": 32, "Z5": 32, "Mix": 25}.get(zone, 24)
     return round(distanz_km / v + (hoehenmeter / 100) * (6 / 60), 1)
 
-def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None):
+def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None,
+                       konstant_g_h=None):
     sf_res = e.get("softflasks", {})
     wf = e.get("wasserflaschen", {})
     sonne_label = {"keine": "Bedeckt", "mittel": "Teils sonnig", "stark": "Vollsonne"}
+    ist_konstant_export = konstant_g_h is not None
+
+    if ist_konstant_export:
+        carbs_zeile = (
+            f"Gesamt        : {e['carbs']['gesamt']} g  "
+            f"({konstant_g_h} g/h konstant via {e['carbs']['quelle']})"
+        )
+    else:
+        carbs_zeile = (
+            f"Gesamt        : {e['carbs']['gesamt']} g  "
+            f"(O {e['carbs']['pro_h_avg']} g/h progressiv via {e['carbs']['quelle']})"
+        )
 
     lines = [
         "=" * 62,
@@ -994,7 +1007,7 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
         f"Zone   : {e['zone']}  |  Dauer: {e['dauer_h']} h  |  Temp: {e['temp']} °C",
         "",
         "--- KOHLENHYDRATE ---",
-        f"Gesamt        : {e['carbs']['gesamt']} g  (O {e['carbs']['pro_h_avg']} g/h progressiv via {e['carbs']['quelle']})",
+        carbs_zeile,
         f"Basis         : {e['carbs']['basis']} g",
         f"HM-Bonus      : {e['carbs']['hm_bonus']} g",
         f"Aus Gels      : {e['carbs']['aus_gels']} g",
@@ -1003,9 +1016,15 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
     if sf_res.get("ratio_info"):
         ri = sf_res["ratio_info"]
         lines.append(f"Glukose:Frukt. : {ri[2]}")
-    # Progressiver Stundenplan im TXT
+    # Stundenplan im TXT: progressiv oder konstant
     prog_txt = e["carbs"].get("progressiv", [])
-    if prog_txt and len(prog_txt) > 1:
+    if ist_konstant_export and prog_txt and len(prog_txt) > 1:
+        # Konstante Strategie: einfache Zeile statt Stundenplan
+        gesamt_konstant = round(konstant_g_h * e["dauer_h"])
+        lines.append("")
+        lines.append(f"  Strategie     : Konstant {konstant_g_h} g/h jede Stunde")
+        lines.append(f"  Gesamt        : {gesamt_konstant} g")
+    elif prog_txt and len(prog_txt) > 1:
         lines.append("")
         lines.append("  Progressiver Zeitplan (Stunde -> g/h -> Menge):")
         for s in prog_txt:
@@ -2376,9 +2395,16 @@ if st.session_state.ergebnis:
                        f"Gewichtetes Wasser: {e['wasser']['pro_h']} ml/h")
 
     # ── Kernkennzahlen ──
+    # hat_progressiv_data vorab berechnen (wird auch weiter unten bei der Strategie-Wahl gebraucht)
+    _prog_vorschau = e["carbs"].get("progressiv", [])
+    _hat_prog_vorschau = bool(_prog_vorschau and len(_prog_vorschau) > 1)
+    _carbs_subtitle = (
+        f"Ø {e['carbs']['pro_h_avg']} g/h (progressiv)"
+        if _hat_prog_vorschau
+        else f"{e['carbs']['pro_h']} g/h"
+    )
     cols = st.columns(4)
-    cols[0].metric("🍬 Carbs gesamt", f"{e['carbs']['gesamt']} g",
-                   f"Ø {e['carbs']['pro_h_avg']} g/h (progressiv)")
+    cols[0].metric("🍬 Carbs gesamt", f"{e['carbs']['gesamt']} g", _carbs_subtitle)
     cols[1].metric("💧 Wasser gesamt", f"{e['wasser']['gesamt']} ml", f"{e['wasser']['pro_h']} ml/h")
     cols[2].metric("⏱ Dauer", f"{e['dauer_h']} h")
     cols[3].metric("🌡 Temperatur", f"{e['temp']} °C")
@@ -2410,9 +2436,51 @@ if st.session_state.ergebnis:
         cols[2].metric("Davon Gels", f"{e['carbs']['aus_gels']} g")
         cols[3].metric("Davon Riegel", f"{e['carbs']['aus_riegeln']} g")
 
+    # ── Ernährungs-Strategie wählen ──
+    prog = _prog_vorschau          # bereits oben berechnet
+    hat_progressiv_data = _hat_prog_vorschau
+
+    if hat_progressiv_data:
+        carb_strategie = st.radio(
+            "🍽️ Ernährungs-Strategie",
+            ["📈 Progressiv (wissenschaftlich empfohlen)", "➡️ Konstant (feste g/h)"],
+            horizontal=True,
+            help=(
+                "**Progressiv:** Die Carb-Zufuhr steigt mit der Zeit, weil der Körper "
+                "zunehmend auf externe Energie angewiesen ist. Wissenschaftlich optimal "
+                "für Einheiten ≥ 2 h (Jeukendrup 2014).\n\n"
+                "**Konstant:** Du nimmst jede Stunde dieselbe Menge auf. Einfacher "
+                "in der Praxis – z. B. wenn du lieber gleichmäßig isst oder mit einem "
+                "fixen Gel-/Riegel-Rhythmus arbeitest."
+            ),
+        )
+        ist_konstant = carb_strategie.startswith("➡️")
+    else:
+        ist_konstant = True  # Kurze Einheiten: immer konstant
+
+    # Konstant-Slider (nur sichtbar wenn Konstant-Modus UND lange Einheit)
+    if ist_konstant and hat_progressiv_data:
+        konstant_default = int(e["carbs"]["pro_h"])
+        konstant_g_h = st.slider(
+            "Konstante Carb-Zufuhr (g/h)",
+            min_value=30, max_value=90,
+            value=min(90, konstant_default), step=5,
+            help=(
+                "Wähle eine feste Carb-Menge, die du jede Stunde aufnimmst. "
+                f"Empfehlung für {e['zone']}: {konstant_default} g/h (basiert auf deiner Leistung/Zone). "
+                "Max. 90 g/h (physiologische Aufnahmegrenze)."
+            ),
+        )
+        gesamt_konstant = round(konstant_g_h * e["dauer_h"])
+        st.info(
+            f"➡️ **Konstante Zufuhr:** {konstant_g_h} g/h × {e['dauer_h']} h "
+            f"= **{gesamt_konstant} g gesamt**"
+        )
+    else:
+        konstant_g_h = None  # wird im Bilanz-Abschnitt per Slider gesetzt
+
     # ── Progressiver Stundenplan ──
-    prog = e["carbs"].get("progressiv", [])
-    if prog and len(prog) > 1:
+    if not ist_konstant:
         with st.expander("📈 Progressiver Carb-Zeitplan (stündlich)", expanded=True):
             st.caption(
                 "Die Carb-Empfehlung steigt über die Zeit, weil der Körper zunehmend auf "
@@ -2482,12 +2550,14 @@ if st.session_state.ergebnis:
                     + np_hinweis
                 )
 
-        prog_plan = e["carbs"].get("progressiv", [])
+        # Welchen Plan verwenden wir für die Bilanz?
+        prog_plan = e["carbs"].get("progressiv", []) if not ist_konstant else []
         hat_progressiv = len(prog_plan) > 1
 
         col_in1, col_in2 = st.columns(2)
 
         if hat_progressiv:
+            # Progressiv-Modus: %-Slider
             zufuhr_skalar = col_in1.slider(
                 "Wie viel % des progressiven Plans isst du tatsächlich?",
                 min_value=50, max_value=120,
@@ -2498,13 +2568,18 @@ if st.session_state.ergebnis:
                     "120 % = du isst mehr (z.B. Gut-Training ermöglicht höhere Mengen)."
                 ),
             ) / 100.0
-            # Anzeige der resultierenden Durchschnittszufuhr
             zufuhr_avg_anzeige = round(
                 sum(s["carbs_g_h"] * zufuhr_skalar for s in prog_plan) / len(prog_plan)
             )
             col_in1.caption(f"→ Ø {zufuhr_avg_anzeige} g/h über alle Stunden")
             zufuhr_pro_h_fallback = zufuhr_avg_anzeige
+        elif ist_konstant and konstant_g_h is not None:
+            # Konstant-Modus (lange Einheit): Wert kommt vom Slider oben
+            zufuhr_pro_h_fallback = konstant_g_h
+            zufuhr_skalar = 1.0
+            col_in1.metric("Konstante Zufuhr (g/h)", f"{konstant_g_h} g/h")
         else:
+            # Kurze Einheit oder kein progressiver Plan: eigener Slider
             zufuhr_default = round(e["carbs"]["gesamt"] / e["dauer_h"]) if e["dauer_h"] > 0 else 0
             zufuhr_pro_h_fallback = col_in1.slider(
                 "Realistische Zufuhr (g/h)",
@@ -2571,18 +2646,28 @@ if st.session_state.ergebnis:
 
         # Verlaufstabelle
         st.markdown("**Stundenweiser Verlauf**")
-        st.caption(
-            "📌 **Lesehilfe:** *Gesamtbedarf* = was der Körper an Carbs verbrennt (konstant bei gleicher Leistung). "
-            "*Deine Zufuhr* = was du laut Plan isst (steigt progressiv). "
-            "*Aus Glykogen* = die Differenz, die dein Körper aus den Speichern ergänzt — "
-            "früh hoch (Speicher kompensieren geringe Zufuhr), später gering (du isst genug). "
-            "Das ist korrekte Physiologie: progressive Ernährung schont die Speicher zunehmend."
-        )
+        if ist_konstant:
+            st.caption(
+                "📌 **Lesehilfe:** *Verbrauch* = was der Körper an Carbs verbrennt. "
+                f"*Zufuhr* = konstant {zufuhr_pro_h_fallback:.0f} g/h jede Stunde. "
+                "*Aus Glykogen* = Differenz, die aus den Speichern kommt. "
+                "Bei konstanter Zufuhr ist die Speicher-Entleerung am Anfang höher "
+                "(wenn der Bedarf die Zufuhr übersteigt) und sinkt, sobald Zufuhr = Bedarf."
+            )
+        else:
+            st.caption(
+                "📌 **Lesehilfe:** *Gesamtbedarf* = was der Körper an Carbs verbrennt (konstant bei gleicher Leistung). "
+                "*Deine Zufuhr* = was du laut Plan isst (steigt progressiv). "
+                "*Aus Glykogen* = die Differenz, die dein Körper aus den Speichern ergänzt — "
+                "früh hoch (Speicher kompensieren geringe Zufuhr), später gering (du isst genug). "
+                "Das ist korrekte Physiologie: progressive Ernährung schont die Speicher zunehmend."
+            )
+        zufuhr_spalte = "Zufuhr" if ist_konstant else "Zufuhr ↑"
         stunden = bilanz["stunden"]
         st.table({
             "Bis Stunde": [f"{s['stunde_bis']:.1f} h" for s in stunden],
             "Verbrauch": [f"{s['verbrauch_g']:.0f} g" for s in stunden],
-            "Zufuhr ↑": [f"{s['zufuhr_g']:.0f} g" for s in stunden],
+            zufuhr_spalte: [f"{s['zufuhr_g']:.0f} g" for s in stunden],
             "Aus Glykogen ↓": [
                 "✓ gedeckt" if s["gedeckt"] else f"+{s['defizit_g']:.0f} g"
                 for s in stunden
@@ -2941,7 +3026,9 @@ genauer als die Pauschalrechnung.
         or e.get("carbs", {}).get("aus_riegeln", 0) > 0
     ):
         rs = berechne_resupply_stopps(profil, e, _gpx_dl)
-    plan_text = erstelle_plan_text(e, w, wp, rs)
+    # konstant_g_h ist nur gesetzt wenn der User die Konstant-Strategie gewählt hat
+    _export_konstant = konstant_g_h if (ist_konstant and hat_progressiv_data and konstant_g_h is not None) else None
+    plan_text = erstelle_plan_text(e, w, wp, rs, konstant_g_h=_export_konstant)
     pdf_bytes = erstelle_plan_pdf(e, w, wp, rs)
     dl_col1, dl_col2 = st.columns(2)
     with dl_col1:
