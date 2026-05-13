@@ -1029,7 +1029,7 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
         "",
         "(c) 2024-2025 Felix Manasov. Alle Rechte vorbehalten.",
         "Nutzung der App erlaubt. Kopieren/Weitergabe des Codes untersagt.",
-        "https://github.com/felixmanasov/fueling-planner",
+        "https://github.com/FeDaSy/fueling-planner",
     ]
     return "\n".join(lines)
 
@@ -1715,7 +1715,7 @@ sportmedizinische Beratung.
 
 **Geltendes Recht:** Deutsches Recht (UrhG) und EU-Urheberrecht.
 
-**Lizenzanfragen:** [GitHub Issues](https://github.com/felixmanasov/fueling-planner/issues)
+**Lizenzanfragen:** [GitHub Issues](https://github.com/FeDaSy/fueling-planner/issues)
 
 ---
 *Cycling Fueling Planner – © 2024–2025 Felix Manasov – Alle Rechte vorbehalten*
