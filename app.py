@@ -260,7 +260,8 @@ def speicher_zone(prozent):
 
 
 def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
-                             hm_bonus_g=0, start_voll_pct=1.0):
+                             hm_bonus_g=0, start_voll_pct=1.0,
+                             progressive_plan=None, zufuhr_skalar=1.0):
     """
     Berechnet die kumulative Glykogen-Speicherbilanz stundenweise.
 
@@ -268,9 +269,12 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
         profil: Nutzerprofil (für Körpergewicht & Trainingsstatus)
         dauer_h: Gesamtdauer in Stunden (float)
         verbrauch_pro_h: physiologischer KH-Verbrauch in g/h
-        zufuhr_pro_h: tatsächliche KH-Zufuhr in g/h (gut-limitiert, typ. 60–120)
+        zufuhr_pro_h: tatsächliche KH-Zufuhr in g/h (Fallback wenn kein progressive_plan)
         hm_bonus_g: zusätzlicher KH-Verbrauch aus Höhenmetern (gesamt, wird verteilt)
-        start_voll_pct: Speicherfüllstand zu Beginn (0..1), z.B. 1.0=voll, 0.8=nicht ideal geladen
+        start_voll_pct: Speicherfüllstand zu Beginn (0..1)
+        progressive_plan: optionale Liste aus berechne_progressive_carbs_plan()
+                          mit stündlichen Zufuhrmengen; überschreibt zufuhr_pro_h.
+        zufuhr_skalar: Skalierungsfaktor für progressive Zufuhr (z.B. 0.8 = 80% des Plans).
 
     Returns:
         dict mit Start-Speicher, stundenweisem Verlauf, kritischer Stunde, Empfehlungen.
@@ -278,7 +282,6 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
     gewicht = profil.get("koerpergewicht_kg", 75)
     status = profil.get("trainings_status", "trained")
     geschlecht = profil.get("geschlecht", "Männlich")
-    # Geschlechtsspezifische g/kg-Werte (Frauen: −12 bis −19% je nach Loading-Status)
     speicher_tabelle = GLYKOGEN_SPEICHER_G_PRO_KG.get(geschlecht,
                                                      GLYKOGEN_SPEICHER_G_PRO_KG["Männlich"])
     g_pro_kg = speicher_tabelle.get(status, 8.0)
@@ -289,17 +292,28 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
     hm_bonus_pro_h = hm_bonus_g / dauer_h if dauer_h > 0 else 0
     verbrauch_eff = verbrauch_pro_h + hm_bonus_pro_h
 
+    # Progressive Zufuhr-Lookup vorbereiten (Index = Stunden-Schritt 0,1,2,...)
+    prog_lookup = {}
+    if progressive_plan:
+        for s in progressive_plan:
+            prog_lookup[s["stunde"] - 1] = s["carbs_g_h"] * zufuhr_skalar
+
     # Stundenweise Bilanz (volle Stunden + ggf. Reststunde)
     stunden_liste = []
     speicher_rest = speicher_start_g
     kritische_stunde = None
 
-    # Wir rechnen in 1h-Schritten; letzte Stunde ggf. anteilig
     h = 0.0
+    schritt_idx = 0
     while h < dauer_h - 1e-6:
         schritt = min(1.0, dauer_h - h)
         verbrauch_h = verbrauch_eff * schritt
-        zufuhr_h = zufuhr_pro_h * schritt
+        # Zufuhr: progressiv wenn vorhanden, sonst flat
+        if prog_lookup:
+            rate = prog_lookup.get(schritt_idx, list(prog_lookup.values())[-1])
+        else:
+            rate = zufuhr_pro_h
+        zufuhr_h = rate * schritt
         defizit_h = verbrauch_h - zufuhr_h
         speicher_rest -= defizit_h
         # Speicher kann nicht über 100% gehen (Überzufuhr wird oxidiert, nicht eingelagert)
@@ -320,6 +334,7 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
         if kritische_stunde is None and rest_pct < 0.30:
             kritische_stunde = round(h_end, 2)
         h = h_end
+        schritt_idx += 1
 
     # End-Status und Empfehlungen
     end_speicher_g = stunden_liste[-1]["speicher_rest_g"] if stunden_liste else speicher_start_g
@@ -356,16 +371,18 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
             "Plan hat Puffer – auch bei leichten Intensitätsschwankungen sicher."
         )
 
-    if zufuhr_pro_h < verbrauch_eff - 30 and dauer_h > 3:
-        defizit_pro_h = verbrauch_eff - zufuhr_pro_h
+    # Für Empfehlungen: effektive Durchschnittszufuhr nutzen
+    zufuhr_avg = gesamt_zufuhr / dauer_h if dauer_h > 0 else zufuhr_pro_h
+    if zufuhr_avg < verbrauch_eff - 30 and dauer_h > 3:
+        defizit_pro_h = verbrauch_eff - zufuhr_avg
         empfehlungen.append(
-            f"📉 Pro Stunde {defizit_pro_h:.0f} g Defizit aus Speichern. "
+            f"📉 Durchschnittlich {defizit_pro_h:.0f} g/h Defizit aus Speichern. "
             f"Speicher schmilzt um ~{(defizit_pro_h/speicher_voll_g)*100:.1f}% pro Stunde."
         )
 
-    if zufuhr_pro_h > 100:
+    if zufuhr_avg > 100:
         empfehlungen.append(
-            f"💡 Zufuhr von {zufuhr_pro_h} g/h ist hoch – Glukose:Fructose 1:0.8 "
+            f"💡 Zufuhr von {zufuhr_avg:.0f} g/h (Ø) ist hoch – Glukose:Fructose 1:0.8 "
             "und Training des Darms (Gut Training) sind Voraussetzung."
         )
 
@@ -2466,21 +2483,41 @@ if st.session_state.ergebnis:
                     + np_hinweis
                 )
 
-        # Zufuhr: planmäßig = was im Planner steht (carbs gesamt / dauer)
-        zufuhr_default = round(e["carbs"]["gesamt"] / e["dauer_h"]) if e["dauer_h"] > 0 else 0
-        zufuhr_default = min(120, zufuhr_default)
+        prog_plan = e["carbs"].get("progressiv", [])
+        hat_progressiv = len(prog_plan) > 1
 
         col_in1, col_in2 = st.columns(2)
-        zufuhr_pro_h = col_in1.slider(
-            "Realistische Zufuhr (g/h)",
-            min_value=30, max_value=120,
-            value=int(zufuhr_default), step=5,
-            help=(
-                "Was du tatsächlich pro Stunde aufnehmen kannst. Typischer Bereich: "
-                "60–90 g/h ohne Gut-Training, bis 120 g/h mit Glucose:Fructose-Mix "
-                "und trainiertem Darm. Standardwert = was der Plan vorsieht."
-            ),
-        )
+
+        if hat_progressiv:
+            zufuhr_skalar = col_in1.slider(
+                "Wie viel % des progressiven Plans isst du tatsächlich?",
+                min_value=50, max_value=120,
+                value=100, step=5,
+                help=(
+                    "100 % = du folgst dem Plan exakt (empfohlen). "
+                    "80 % = du isst weniger als geplant (z.B. Magenprobleme). "
+                    "120 % = du isst mehr (z.B. Gut-Training ermöglicht höhere Mengen)."
+                ),
+            ) / 100.0
+            # Anzeige der resultierenden Durchschnittszufuhr
+            zufuhr_avg_anzeige = round(
+                sum(s["carbs_g_h"] * zufuhr_skalar for s in prog_plan) / len(prog_plan)
+            )
+            col_in1.caption(f"→ Ø {zufuhr_avg_anzeige} g/h über alle Stunden")
+            zufuhr_pro_h_fallback = zufuhr_avg_anzeige
+        else:
+            zufuhr_default = round(e["carbs"]["gesamt"] / e["dauer_h"]) if e["dauer_h"] > 0 else 0
+            zufuhr_pro_h_fallback = col_in1.slider(
+                "Realistische Zufuhr (g/h)",
+                min_value=30, max_value=120,
+                value=int(min(120, zufuhr_default)), step=5,
+                help=(
+                    "Was du tatsächlich pro Stunde aufnehmen kannst. "
+                    "Standardwert = was der Plan vorsieht."
+                ),
+            )
+            zufuhr_skalar = 1.0
+
         start_voll_pct = col_in2.slider(
             "Speicher-Füllstand am Start (%)",
             min_value=50, max_value=100,
@@ -2496,9 +2533,11 @@ if st.session_state.ergebnis:
             profil=profil,
             dauer_h=e["dauer_h"],
             verbrauch_pro_h=verbrauch_roh,
-            zufuhr_pro_h=zufuhr_pro_h,
+            zufuhr_pro_h=zufuhr_pro_h_fallback,
             hm_bonus_g=e["carbs"]["hm_bonus"],
             start_voll_pct=start_voll_pct,
+            progressive_plan=prog_plan if hat_progressiv else None,
+            zufuhr_skalar=zufuhr_skalar,
         )
 
         # Kernmetriken
