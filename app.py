@@ -1,3 +1,25 @@
+# =============================================================================
+#  CYCLING FUELING PLANNER
+#  Copyright (c) 2024-2025 Felix Manasov. Alle Rechte vorbehalten.
+#
+#  Dieses Werk ist urheberrechtlich geschuetzt. Die Nutzung der Web-Applikation
+#  unter der oeffentlichen URL ist ausdruecklich erlaubt und kostenfrei.
+#
+#  VERBOTEN ohne ausdrueckliche schriftliche Genehmigung des Urhebers:
+#    - Kopieren, Reproduzieren oder Vervielfaeltigen des Quellcodes
+#    - Modifizieren, Abwandeln oder Erstellen von Ableitungen (Derivative Works)
+#    - Weitergabe oder Veroeffentlichung des Codes (ganz oder in Teilen)
+#    - Kommerzielle Nutzung oder Einbindung in eigene Produkte
+#    - Entfernen oder Veraendern dieses Urheberrechtsvermerks
+#
+#  Kontakt: Anfragen zur Lizenzierung oder Kooperation per GitHub-Issue.
+#
+#  This software is proprietary and confidential. Source code is made visible
+#  solely for the purpose of deployment on Streamlit Community Cloud.
+#  Visibility does not constitute a license to use, copy, or modify the code.
+#  See LICENSE file for full terms.
+# =============================================================================
+
 import copy
 import math
 import json
@@ -1000,7 +1022,15 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
                         lines.append(f"       {adresse}")
             lines.append("")
 
-    lines += ["=" * 62, "  Ende des Plans", "=" * 62]
+    lines += [
+        "=" * 62,
+        "  Ende des Plans",
+        "=" * 62,
+        "",
+        "(c) 2024-2025 Felix Manasov. Alle Rechte vorbehalten.",
+        "Nutzung der App erlaubt. Kopieren/Weitergabe des Codes untersagt.",
+        "https://github.com/felixmanasov/fueling-planner",
+    ]
     return "\n".join(lines)
 
 
@@ -1266,6 +1296,11 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     pdf.set_text_color(160, 160, 160)
     pdf.cell(W, 5,
              _s(f"Erstellt mit Cycling Fueling Planner  |  {datetime.now().strftime('%d.%m.%Y %H:%M')}"),
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    pdf.set_x(LM)
+    pdf.cell(W, 4,
+             _s("(c) 2024-2025 Felix Manasov. Alle Rechte vorbehalten. Nutzung der App erlaubt, "
+                "Kopieren/Weitergabe des Codes untersagt."),
              new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
 
     return bytes(pdf.output())
@@ -1651,6 +1686,8 @@ with st.sidebar:
 
 st.title("🚴 Cycling Fueling Planner")
 st.caption("Berechne deinen persönlichen Ernährungs- und Trinkplan für die nächste Ausfahrt.")
+st.caption("© 2024–2025 Felix Manasov · Alle Rechte vorbehalten · "
+           "[Nutzungsbedingungen & Lizenz](https://github.com/felixmanasov/fueling-planner/blob/main/LICENSE)")
 
 # ── GPX-Upload (AUSSERHALB des Formulars – funktioniert sonst nicht) ──────────
 st.subheader("1. Route")

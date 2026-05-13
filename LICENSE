@@ -1,0 +1,87 @@
+PROPRIETARY SOFTWARE LICENSE
+============================
+
+Cycling Fueling Planner
+Copyright (c) 2024-2025 Felix Manasov
+Alle Rechte vorbehalten. / All rights reserved.
+
+
+NUTZUNGSBEDINGUNGEN (DEUTSCH)
+────────────────────────────────────────────────────────────────────────────────
+
+1. NUTZUNGSRECHT (ERLAUBT)
+   Die öffentlich zugängliche Web-Applikation darf kostenlos und ohne
+   Registrierung für persönliche, nicht-kommerzielle Zwecke genutzt werden.
+   Das Aufrufen der App-URL, das Eingeben von Trainingsdaten und das
+   Herunterladen der generierten Pläne (PDF, TXT) ist ausdrücklich erlaubt.
+
+2. URHEBERRECHTSSCHUTZ
+   Der Quellcode dieser Software ist urheberrechtlich geschützt.
+   Die Sichtbarkeit des Codes im GitHub-Repository dient ausschließlich
+   dem technischen Deployment auf der Streamlit Community Cloud und stellt
+   keine Lizenzierung zur Nutzung, Kopie oder Modifikation des Codes dar.
+
+3. VERBOTENE HANDLUNGEN (OHNE SCHRIFTLICHE GENEHMIGUNG)
+   Folgende Handlungen sind ausdrücklich UNTERSAGT:
+
+   a) Kopieren, Reproduzieren oder Vervielfältigen des Quellcodes,
+      ganz oder in Teilen, in jedweder Form oder auf jedwedem Medium.
+
+   b) Modifizieren, Anpassen, Übersetzen oder Erstellen abgeleiteter
+      Werke (Derivative Works) auf Basis dieses Codes.
+
+   c) Weitergabe, Veröffentlichung, Lizenzierung oder Verkauf des Codes
+      oder modifizierter Versionen an Dritte.
+
+   d) Kommerzielle Nutzung des Codes, der generierten Inhalte oder der
+      Berechnungslogik in eigenen Produkten oder Dienstleistungen.
+
+   e) Entfernen, Verändern oder Verbergen dieses Urheberrechtsvermerks
+      oder sonstiger Eigentumsangaben.
+
+   f) Reverse Engineering, Dekompilierung oder Disassemblierung, soweit
+      nicht ausdrücklich gesetzlich erlaubt.
+
+4. KEINE GARANTIE
+   Die Software wird "wie besehen" (AS IS) bereitgestellt, ohne Garantie
+   jeglicher Art. Der Urheber übernimmt keine Haftung für Schäden, die
+   aus der Nutzung der App oder der generierten Pläne entstehen.
+   Die berechneten Ernährungs- und Trinkempfehlungen ersetzen keine
+   professionelle sportmedizinische Beratung.
+
+5. GELTENDES RECHT
+   Diese Vereinbarung unterliegt dem deutschen Recht. Urheberrechtliche
+   Ansprüche richten sich nach dem Urheberrechtsgesetz (UrhG) der
+   Bundesrepublik Deutschland sowie dem EU-Urheberrecht.
+
+6. KONTAKT & LIZENZIERUNG
+   Anfragen zur kommerziellen Nutzung, Kooperation oder alternativen
+   Lizenzierung bitte per GitHub-Issue:
+   https://github.com/felixmanasov/fueling-planner/issues
+
+
+TERMS OF USE (ENGLISH SUMMARY)
+────────────────────────────────────────────────────────────────────────────────
+
+PERMITTED: Using the web application at its public URL for personal,
+non-commercial purposes.
+
+PROHIBITED without prior written consent:
+  - Copying, reproducing, or distributing the source code
+  - Modifying the code or creating derivative works
+  - Commercial use of the code or its underlying logic
+  - Removing or altering copyright notices
+
+The source code is made visible solely for deployment on Streamlit Community
+Cloud. Visibility does not imply any license to use, copy, or modify the code.
+
+This software is provided "AS IS" without warranty of any kind.
+The nutritional calculations are not a substitute for professional advice.
+
+Governing law: German law (UrhG) and EU copyright law.
+
+For licensing inquiries: https://github.com/felixmanasov/fueling-planner/issues
+
+================================================================================
+Cycling Fueling Planner – © 2024-2025 Felix Manasov – All Rights Reserved
+================================================================================
