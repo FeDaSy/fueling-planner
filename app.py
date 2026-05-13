@@ -33,25 +33,28 @@ import streamlit as st
 # ── Konstanten ────────────────────────────────────────────────────────────────
 CARBS_PRO_STUNDE = {"Z1": 30, "Z2": 60, "Z3": 75, "Z4": 90, "Z5": 90, "Mix": 70}
 
-# ── Progressive Carb-Matrix (Zone × kumulierte Zeit) ─────────────────────────
-# Wissenschaftliche Basis:
-# - Vøllestad & Blom (1985): zonenspezifische Glykogenabbauraten
-# - Jeukendrup (2014, PMC4008807): durationsbasierte Carb-Empfehlungen
-# - Gonzalez & van Loon (2016): Leberglykogenschutz ab 90 g/h bei >150 min
-# - Impey & Morton (2018): Glykogen-Schwellen-Hypothese
-# Logik: Stunde 1 = Glykogenspeicher voll → weniger exogene Carbs nötig.
-#        Ab Stunde 3+ steigt Abhängigkeit von exogenen Carbs stark an.
-#        Deckel bei Z4/Z5 trotz hohem Bedarf: Darmblutfluss sinkt um ~70%
-#        bei >80% VO2max → Absorption limitiert, nicht Muskelnachfrage.
-# Aufbau: Liste von (max_kumuliert_min, {zone: g_per_h})
-# Letzte Zeile gilt für alle darüber hinausgehenden Zeiten.
-PROGRESSIVE_CARBS_MATRIX = [
-    # kum.min  Z1   Z2   Z3   Z4   Z5
-    ( 60,  {"Z1": 10, "Z2": 35, "Z3": 50, "Z4": 60, "Z5": 60}),
-    (120,  {"Z1": 20, "Z2": 55, "Z3": 70, "Z4": 85, "Z5": 85}),
-    (180,  {"Z1": 30, "Z2": 68, "Z3": 85, "Z4": 90, "Z5": 90}),
-    (240,  {"Z1": 40, "Z2": 83, "Z3": 90, "Z4": 90, "Z5": 90}),
-    (9999, {"Z1": 50, "Z2": 90, "Z3": 90, "Z4": 90, "Z5": 90}),
+# ── Progressive Carb-Multiplikatoren (Zone × kumulierte Zeit) ────────────────
+# Relativer Ansatz: Multiplikatoren werden auf den tatsächlichen carbs_pro_h-Wert
+# (aus Watt oder Zone) angewendet. Dadurch ist der progressive Plan immer konsistent
+# mit dem physiologischen Verbrauch in der Glykogen-Speicherbilanz.
+#
+# Herleitung: Matrixwerte / Zonen-Flachrate (CARBS_PRO_STUNDE)
+#   Z1 flat=30:  10/30=0.33, 20/30=0.67, 30/30=1.00, 40/30=1.33, 50/30=1.67
+#   Z2 flat=60:  35/60=0.58, 55/60=0.92, 68/60=1.13, 83/60=1.38, 90/60=1.50
+#   Z3 flat=75:  50/75=0.67, 70/75=0.93, 85/75=1.13, 90/75=1.20, 90/75=1.20
+#   Z4 flat=90:  60/90=0.67, 85/90=0.94, 90/90=1.00, 90/90=1.00, 90/90=1.00
+#   Z5 flat=90:  gleich Z4 (GI-Limit verhindert höhere Absorption)
+#
+# Deckel: min(rate, 90) – Absorptionsgrenze für Doppelquelle Glukose+Fruktose.
+# Wissenschaftliche Quellen: Vøllestad & Blom (1985), Jeukendrup (2014),
+# Gonzalez & van Loon (2016), Impey & Morton (2018).
+PROGRESSIVE_MULTIPLIKATOREN = [
+    # (max_kum_min, {zone: multiplikator})
+    ( 60,  {"Z1": 0.33, "Z2": 0.58, "Z3": 0.67, "Z4": 0.67, "Z5": 0.67}),
+    (120,  {"Z1": 0.67, "Z2": 0.92, "Z3": 0.93, "Z4": 0.94, "Z5": 0.94}),
+    (180,  {"Z1": 1.00, "Z2": 1.13, "Z3": 1.13, "Z4": 1.00, "Z5": 1.00}),
+    (240,  {"Z1": 1.33, "Z2": 1.38, "Z3": 1.20, "Z4": 1.00, "Z5": 1.00}),
+    (9999, {"Z1": 1.67, "Z2": 1.50, "Z3": 1.20, "Z4": 1.00, "Z5": 1.00}),
 ]
 INTENSITAETS_FAKTOR = {"Z1": 0.85, "Z2": 1.0, "Z3": 1.15, "Z4": 1.25, "Z5": 1.3, "Mix": 1.1}
 SONNEN_FAKTOR = {"keine": 1.0, "mittel": 1.1, "stark": 1.2}
@@ -145,26 +148,25 @@ DEFAULT_PROFIL = {
 
 # ── Backend-Funktionen ────────────────────────────────────────────────────────
 
-def berechne_progressive_carbs_plan(zone, dauer_h):
+def berechne_progressive_carbs_plan(zone, dauer_h, carbs_pro_h=60):
     """
     Berechnet stündliche Carb-Empfehlungen progressiv nach Zone und kumulierter Zeit.
 
-    Bei Watt-Eingabe: carbs_pro_h_watt ist die wattbasierte g/h-Rate für die erste
-    Stunde. Die Matrix skaliert relative Steigerungen darauf auf.
-    Bei Zonen-Eingabe: direkte Matrixwerte.
+    Relativer Ansatz: Multiplikatoren aus PROGRESSIVE_MULTIPLIKATOREN werden auf
+    carbs_pro_h (tatsächlicher Verbrauch aus Watt/Zone) angewendet. So ist der
+    progressive Plan immer konsistent mit der Glykogen-Speicherbilanz (kein Überschuss
+    der Zufuhr über den Verbrauch in späten Stunden → keine scheinbare Speicher-Auffüllung).
 
-    Returns: list of dicts mit Stunden-Breakdown + Gesamtsumme.
+    Deckel bei 90 g/h (Absorptionsgrenze Dual-Source Glukose+Fruktose).
+
+    Returns: list of dicts mit Stunden-Breakdown.
     """
-    def rate_fuer_minute(kum_min, z):
+    def multiplikator_fuer_minute(kum_min, z):
         z_key = z if z in ("Z1","Z2","Z3","Z4","Z5") else "Z2"
-        for max_min, rates in PROGRESSIVE_CARBS_MATRIX:
+        for max_min, mults in PROGRESSIVE_MULTIPLIKATOREN:
             if kum_min <= max_min:
-                return rates[z_key]
-        return PROGRESSIVE_CARBS_MATRIX[-1][1].get(z_key, 90)
-
-    # Zone bestimmt die Matrix-Werte direkt – kein Skalar.
-    # Die Zone wird aus Watt/HF/Manualauswahl abgeleitet und bestimmt das progressive Muster.
-    z_key = zone if zone in ("Z1","Z2","Z3","Z4","Z5") else "Z2"
+                return mults[z_key]
+        return PROGRESSIVE_MULTIPLIKATOREN[-1][1].get(z_key, 1.0)
 
     plan = []
     total_min = dauer_h * 60
@@ -175,9 +177,10 @@ def berechne_progressive_carbs_plan(zone, dauer_h):
         start_min = kum_min
         end_min = min(kum_min + 60, total_min)
         dauer_min = end_min - start_min
-        # Rate anhand Mittelpunkt der Stunde bestimmen
         mid_kum = (start_min + end_min) / 2
-        rate = rate_fuer_minute(mid_kum, zone)
+        mult = multiplikator_fuer_minute(mid_kum, zone)
+        # Rate = Ist-Verbrauch × Progressions-Multiplikator, max. 90 g/h
+        rate = min(round(carbs_pro_h * mult), 90)
         carbs_g = round(rate * dauer_min / 60)
         plan.append({
             "stunde": stunde,
@@ -305,18 +308,24 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
         else:
             rate = zufuhr_pro_h
         zufuhr_h = rate * schritt
-        defizit_h = verbrauch_h - zufuhr_h
+        # Während der Fahrt können Glykogenspeicher nicht aufgefüllt werden.
+        # Überschuss (Zufuhr > Verbrauch) wird oxidiert, nicht gespeichert.
+        zufuhr_effektiv_h = min(zufuhr_h, verbrauch_h)
+        defizit_h = verbrauch_h - zufuhr_effektiv_h
         speicher_rest -= defizit_h
         # Speicher kann nicht über 100% gehen (Überzufuhr wird oxidiert, nicht eingelagert)
-        speicher_rest = max(0, min(speicher_voll_g, speicher_rest))
+        # Speicher kann nicht über Startwert steigen (keine Glykogensynthese während Fahrt)
+        speicher_rest = max(0, min(speicher_start_g, speicher_rest))
         rest_pct = speicher_rest / speicher_voll_g if speicher_voll_g > 0 else 0
         zone_name, zone_emoji = speicher_zone(rest_pct)
         h_end = h + schritt
+        gedeckt = zufuhr_effektiv_h >= verbrauch_h  # True = Verbrauch vollständig durch Essen gedeckt
         stunden_liste.append({
             "stunde_bis": round(h_end, 2),
             "verbrauch_g": round(verbrauch_h, 1),
-            "zufuhr_g": round(zufuhr_h, 1),
-            "defizit_g": round(defizit_h, 1),
+            "zufuhr_g": round(zufuhr_h, 1),          # Was gegessen wird (inkl. Überschuss)
+            "defizit_g": round(defizit_h, 1),          # Was aus Speichern kommt (0 wenn gedeckt)
+            "gedeckt": gedeckt,
             "speicher_rest_g": round(speicher_rest),
             "speicher_rest_pct": round(rest_pct * 100, 1),
             "zone": zone_name,
@@ -512,7 +521,7 @@ def berechne_alles(profil, dauer_h, zone, temp, sonne, indoor, frueh_start,
     # Progressive Carb-Plan berechnen (Zone × kumulierte Zeit)
     # Nur bei >45 min sinnvoll; darunter flache Rate verwenden
     if dauer_h >= 0.75:
-        prog_plan = berechne_progressive_carbs_plan(zone, dauer_h)
+        prog_plan = berechne_progressive_carbs_plan(zone, dauer_h, carbs_pro_h=carbs_pro_h)
         carbs_basis = sum(s["carbs_g"] for s in prog_plan)
         carbs_pro_h_avg = round(carbs_basis / dauer_h, 1)
     else:
@@ -2572,9 +2581,12 @@ if st.session_state.ergebnis:
         stunden = bilanz["stunden"]
         st.table({
             "Bis Stunde": [f"{s['stunde_bis']:.1f} h" for s in stunden],
-            "Gesamtbedarf": [f"{s['verbrauch_g']:.0f} g" for s in stunden],
-            "Deine Zufuhr ↑": [f"{s['zufuhr_g']:.0f} g" for s in stunden],
-            "Aus Glykogen ↓": [f"{s['defizit_g']:+.0f} g" for s in stunden],
+            "Verbrauch": [f"{s['verbrauch_g']:.0f} g" for s in stunden],
+            "Zufuhr ↑": [f"{s['zufuhr_g']:.0f} g" for s in stunden],
+            "Aus Glykogen ↓": [
+                "✓ gedeckt" if s["gedeckt"] else f"+{s['defizit_g']:.0f} g"
+                for s in stunden
+            ],
             "Speicher rest": [f"{s['speicher_rest_g']} g" for s in stunden],
             "Rest %": [f"{s['emoji']} {s['speicher_rest_pct']:.0f} %" for s in stunden],
         })
