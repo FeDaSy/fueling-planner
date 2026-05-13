@@ -1510,12 +1510,35 @@ elif intensitaet_modus == "Nach Wattleistung":
     watt_modus = st.radio("Watt-Eingabe", ["Einzelne Leistung", "Mix – mehrere Intervalle"], horizontal=True)
     if watt_modus == "Einzelne Leistung":
         watt_eingabe = st.number_input(
-            "Durchschnittliche Leistung (Watt)", 50, 600,
-            value=max(50, profil["ftp_watt"] - 30), step=5, key="watt_einzel"
+            "Normalized Power / NP (Watt) – empfohlen", 50, 600,
+            value=max(50, profil["ftp_watt"] - 30), step=5, key="watt_einzel",
+            help=(
+                "**Normalized Power (NP) eingeben, nicht Average Power!**\n\n"
+                "NP berücksichtigt die Intensitätsvariabilität deiner Fahrt und "
+                "bildet den tatsächlichen Stoffwechselaufwand deutlich präziser ab.\n\n"
+                "**Warum NP?**\n"
+                "Average Power wird durch Ausrollphasen, Abfahrten und Ampelstopps "
+                "nach unten verzerrt – der Körper verbrennt aber in harten Intervallen "
+                "überproportional mehr Kohlenhydrate. NP gleicht das aus.\n\n"
+                "**Wo finde ich NP?**\n"
+                "• Garmin Connect: 'Gewichtete Leistung' in der Aktivitätsübersicht\n"
+                "• Strava: 'Normalisierte Leistung' (nur mit Leistungsmesser)\n"
+                "• Wahoo / TrainingPeaks: direkt als 'NP' oder 'Normalized Power' angegeben\n\n"
+                "**Faustregel:** NP liegt bei typischen Ausfahrten 5–15% über der "
+                "Average Power. Je variabler die Strecke (Hügel, Stopps, Sprints), "
+                "desto größer der Unterschied."
+            )
         )
         zone = watts_zu_zone(watt_eingabe, profil["ftp_watt"])
         pct_ftp = round(watt_eingabe / profil["ftp_watt"] * 100)
-        st.caption(f"→ **{watt_eingabe} W** = {pct_ftp}% FTP → Zone **{zone}**")
+        st.caption(f"→ **{watt_eingabe} W NP** = {pct_ftp}% FTP → Zone **{zone}**")
+        if watt_eingabe == max(50, profil["ftp_watt"] - 30):
+            st.info(
+                "💡 **Tipp:** Trage deine **Normalized Power (NP)** ein, nicht die Average Power. "
+                "NP findest du in Garmin Connect als *'Gewichtete Leistung'* oder in Strava als "
+                "*'Normalisierte Leistung'*. Bei gemischten Fahrten liegt NP typisch 5–15 % über "
+                "dem Durchschnitt und ergibt genauere Carb-Werte."
+            )
     else:
         zone = "Mix"
 
@@ -1531,11 +1554,30 @@ elif intensitaet_modus == "Nach Herzfrequenz":
     if hf_modus == "Einzelne Herzfrequenz":
         hf_eingabe = st.number_input(
             "Durchschnittliche Herzfrequenz (bpm)", 60, 220,
-            value=int(hr * 0.72), step=1, key="hf_einzel"
+            value=int(hr * 0.72), step=1, key="hf_einzel",
+            help=(
+                "**Hinweis: HF ist weniger präzise als Watt für die Carb-Berechnung.**\n\n"
+                "Die App ordnet deine Durchschnitts-HF einer Zone zu und liest daraus "
+                "einen festen Carb-Wert (g/h) ab.\n\n"
+                "**Cardiac Drift:** Bei langen Fahrten (>2 h) steigt die Herzfrequenz "
+                "bei gleicher Leistung durch Dehydrierung und Ermüdung an – die HF "
+                "zeigt dann eine höhere Zone, als die tatsächliche Belastung ist. "
+                "Das führt zu Carb-Werten, die den echten Verbrauch überschätzen.\n\n"
+                "**Besser:** Watt-Steuerung mit Normalized Power nutzen, "
+                "wenn ein Leistungsmesser vorhanden ist."
+            )
         )
         zone = hf_zu_zone(hf_eingabe, hr)
         pct_hrmax = round(hf_eingabe / hr * 100)
         st.caption(f"→ **{hf_eingabe} bpm** = {pct_hrmax}% HRmax → Zone **{zone}**")
+        if dauer_h and float(dauer_h) >= 3:
+            st.warning(
+                "⚠️ **Cardiac Drift:** Bei Fahrten ab 3 h steigt die HF bei gleicher "
+                "Leistung durch Ermüdung und Dehydrierung an. Die Carb-Berechnung über HF "
+                "kann dadurch die tatsächliche Intensität überschätzen. "
+                "Falls ein Leistungsmesser vorhanden ist, liefert **Normalized Power** "
+                "genauere Ergebnisse."
+            )
     else:
         zone = "Mix"
 
@@ -1812,10 +1854,24 @@ if st.session_state.ergebnis:
     # ── Intensitäts-Info ──
     if e["watt"] and e["ftp"]:
         pct = round(e["watt"] / e["ftp"] * 100)
-        st.info(f"⚡ Leistungssteuerung: **{e['watt']:.0f} W** = {pct}% FTP → Zone **{e['zone']}** | {e['carbs']['quelle']}")
+        st.info(
+            f"⚡ Leistungssteuerung: **{e['watt']:.0f} W NP** = {pct}% FTP → Zone **{e['zone']}** "
+            f"| {e['carbs']['quelle']}\n\n"
+            "*Eingabe als Normalized Power (NP) liefert die praezisesten Carb-Werte. "
+            "NP findest du in Garmin Connect als 'Gewichtete Leistung' oder in Strava als "
+            "'Normalisierte Leistung' - typisch 5-15 % ueber der Average Power.*"
+        )
     elif e["hf"] and e["hr_max"]:
         pct = round(e["hf"] / e["hr_max"] * 100)
-        st.info(f"❤️ HF-Steuerung: **{e['hf']:.0f} bpm** = {pct}% HRmax → Zone **{e['zone']}**")
+        drift_hinweis = (
+            " *(Hinweis: Bei langen Fahrten steigt HF durch Cardiac Drift an – "
+            "Watt-Eingabe mit NP wäre präziser.)*"
+            if e["dauer_h"] >= 3 else ""
+        )
+        st.info(
+            f"❤️ HF-Steuerung: **{e['hf']:.0f} bpm** = {pct}% HRmax → Zone **{e['zone']}**"
+            + drift_hinweis
+        )
     else:
         st.info(f"🎯 Zone **{e['zone']}** | {e['carbs']['quelle']}")
 
