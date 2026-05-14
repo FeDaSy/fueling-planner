@@ -2659,45 +2659,47 @@ if st.session_state.ergebnis:
             ),
         ) / 100.0
 
-        # ── Cardiac Drift ──
+        # ── Cardiac Drift (automatisch) ──
+        # Wird ab 2h automatisch eingerechnet auf Basis von Zone, Temperatur, Indoor.
+        # Bei < 2h ist der Effekt vernachlässigbar.
         drift_rate = 0.0
         if e["dauer_h"] >= 2:
             drift_auto = cardiac_drift_rate_auto(e["temp"], ist_indoor, e["zone"])
             drift_pct_auto = round(drift_auto * 100, 1)
-            # Slider braucht ≥ 1 als min — sehr niedrige Auto-Werte aufrunden
-            drift_pct_default = max(1, int(round(drift_pct_auto)))
-            mit_drift = st.checkbox(
-                "🫀 Cardiac Drift einberechnen",
-                value=False,
-                help=(
-                    "Bei gleichbleibender Wattzahl steigt die Herzfrequenz über Zeit "
-                    "(Dehydrierung + Hitzeakkumulation). Das erhöht den RER und damit "
-                    "den Kohlenhydratverbrauch pro Stunde leicht.\n\n"
-                    "**Physiologische Grundlage:** Coyle & González-Alonso (2001), "
-                    "Wingo et al. (2012) – kardiovaskulärer Drift bei längeren "
-                    "Ausdauerbelastungen, verstärkt durch höhere Intensität.\n\n"
-                    f"Auto-Schätzung für Zone **{e['zone']}**, {e['temp']}°C "
-                    f"{'(Indoor)' if ist_indoor else '(Outdoor)'}: "
-                    f"**+{drift_pct_auto}% pro Stunde**."
-                ),
+            drift_rate = drift_auto  # standardmäßig aktiv
+
+            # Transparenz: zeige was berechnet wurde
+            _ort = "Indoor (kein Fahrtwind)" if ist_indoor else "Outdoor"
+            verbrauch_end_auto = verbrauch_roh * (1 + drift_rate * (e["dauer_h"] - 1))
+            st.info(
+                f"🫀 **Cardiac Drift automatisch eingerechnet: +{drift_pct_auto}% pro Stunde** "
+                f"(Zone {e['zone']} · {e['temp']}°C · {_ort})  \n"
+                f"→ Verbrauch steigt von {verbrauch_roh:.0f} g/h (Stunde 1) "
+                f"auf **{verbrauch_end_auto:.0f} g/h** (Stunde {int(e['dauer_h'])}). "
+                f"Du kannst die Rate unten manuell anpassen."
             )
-            if mit_drift:
-                drift_rate = st.slider(
+
+            with st.expander("⚙️ Drift-Rate manuell anpassen", expanded=False):
+                st.caption(
+                    "**Was ist Cardiac Drift?** Bei gleichbleibender Wattzahl steigt deine "
+                    "Herzfrequenz über Zeit durch Dehydrierung und Hitzeakkumulation. "
+                    "Das erhöht den RER → mehr Carbs werden verbrannt.\n\n"
+                    "**Quellen:** Coyle & González-Alonso (2001), Wingo et al. (2012), "
+                    "Lafrenz et al. (2008).\n\n"
+                    f"**Auto-Schätzung:** {drift_pct_auto}%/h. "
+                    "Setze auf 0%, falls du Drift ignorieren willst, oder erhöhe, "
+                    "wenn du weißt, dass du persönlich stark driftest "
+                    "(z.B. schlecht hitzeadaptiert, wenig hydriert).\n\n"
+                    "**Zonen-Einfluss:** Z1/Z2: niedrig. Z3: moderat. Z4/Z5: stark. \n"
+                    "**Temperatur-Einfluss:** <15°C: gering. 15–25°C: moderat. >25°C: hoch."
+                )
+                drift_pct_manual = st.slider(
                     "Drift-Rate (% Mehrverbrauch pro Stunde)",
-                    min_value=1, max_value=15,
-                    value=min(15, drift_pct_default),
+                    min_value=0, max_value=15,
+                    value=int(round(drift_pct_auto)),
                     step=1,
-                    help=(
-                        f"Auto-Schätzung: **{drift_pct_auto}%/h** "
-                        f"(Zone {e['zone']}, {'Indoor' if ist_indoor else 'Outdoor'}, "
-                        f"{e['temp']}°C).\n\n"
-                        "**Zonen-Einfluss:** Z1/Z2: niedriger Drift (gemütliches Tempo). "
-                        "Z3: spürbar (Schwelle). Z4/Z5: starker Drift "
-                        "(hohe Wärmelast + schnelle Glykogen-Entleerung).\n\n"
-                        "**Temperatur-Einfluss:** Kühl: 2–3%. Moderat: 3–5%. "
-                        "Warm: 5–7%. Heiß: 7–10%+."
-                    ),
-                ) / 100.0
+                )
+                drift_rate = drift_pct_manual / 100.0
                 st.caption(
                     f"→ Stunde 1: {verbrauch_roh:.0f} g/h | "
                     f"Stunde 2: {verbrauch_roh*(1+drift_rate):.0f} g/h | "
