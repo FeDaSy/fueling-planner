@@ -3154,7 +3154,10 @@ genauer als die Pauschalrechnung.
         st.caption(
             "Vollständige Offenlegung aller Zwischenschritte. Für Sportler/innen, "
             "die genau verstehen wollen, woher jede Zahl im Plan kommt. "
-            "Alle Formeln und Quellen findest du in `BERECHNUNGEN_UND_APIS.txt`."
+            "Alle Formeln und Quellen findest du in der "
+            "[ausführlichen Berechnungs-Dokumentation]"
+            "(https://github.com/FeDaSy/fueling-planner/blob/main/BERECHNUNGEN_UND_APIS.txt) "
+            "(kein GitHub-Konto nötig)."
         )
 
         # ───────────────────────────────────────────
@@ -3415,7 +3418,10 @@ genauer als die Pauschalrechnung.
 
         st.info(
             "💡 Alle Formeln, Quellenangaben und wissenschaftliche Begründungen "
-            "findest du in der Datei `BERECHNUNGEN_UND_APIS.txt` im GitHub-Repository."
+            "findest du in der vollständigen "
+            "[Berechnungs- & API-Dokumentation auf GitHub]"
+            "(https://github.com/FeDaSy/fueling-planner/blob/main/BERECHNUNGEN_UND_APIS.txt) "
+            "— öffentlich einsehbar, kein GitHub-Konto erforderlich."
         )
 
     # ── Download ──
