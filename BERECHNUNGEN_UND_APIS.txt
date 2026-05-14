@@ -123,6 +123,10 @@ Einschränkung – Cardiac Drift:
     darauf hin, dass HF-Eingaben die Intensität systematisch überschätzen
     und Watt-Eingabe mit NP zuverlässiger ist.
 
+    Cardiac Drift wirkt auch auf den Kohlenhydratverbrauch und wird ab 2 h
+    Dauer automatisch in der Glykogen-Speicherbilanz modelliert
+    (Details siehe Abschnitt 1k).
+
 
 1e) Höhenmeter-Bonus
 ──────────────────────
@@ -172,6 +176,223 @@ Dieses Verhältnis ist im Profil konfigurierbar ("Gel-Anteil").
 Riegel werden im Profil mit Name, Carbs pro Stück und Anzahl der
 mitgenommenen Stücke definiert. Das Skript zeigt die Gesamtmenge
 aller mitgenommenen Riegel und wann Carb-Stopps für Nachschub nötig sind.
+
+
+1h) Progressiver Carb-Stundenplan (Zone × kumulierte Zeit)
+────────────────────────────────────────────────────────────
+Wissenschaftlicher Hintergrund:
+    Der Gesamtbedarf an Carbs pro Stunde bleibt bei konstanter Leistung
+    nahezu konstant – aber die QUELLE der Energie verschiebt sich über die
+    Zeit. Früh in der Belastung liefern die Glykogenspeicher einen großen
+    Anteil; mit zunehmender Depletion muss mehr aus der Nahrung kommen.
+
+    Folgen für die Praxis (Jeukendrup 2014, Vøllestad & Blom 1985,
+    Gonzalez & van Loon 2016, Impey & Morton 2018):
+    - Stunde 1: ca. 40–60 % aus Speichern, Rest aus Essen
+    - Stunde 3: ca. 15–25 % aus Speichern
+    - Stunde 5+: Speicher nahezu leer → Nahrung deckt 100 %
+
+Modell – relative Multiplikatoren auf den Basiswert (carbs_pro_h):
+
+    Kumulierte Zeit   Z1     Z2     Z3     Z4     Z5
+    ─────────────────────────────────────────────────────
+    0–60 min          0,33   0,58   0,67   0,67   0,67
+    60–120 min        0,67   0,92   0,93   0,94   0,94
+    120–180 min       1,00   1,13   1,13   1,00   1,00
+    180–240 min       1,33   1,38   1,20   1,00   1,00
+    > 240 min         1,67   1,50   1,20   1,00   1,00
+
+    rate(stunde) = min(carbs_pro_h × multiplikator, 90 g/h)
+
+    Beispiel: 130 W @ FTP 220 W → carbs_pro_h = 64 g/h, Zone Z2, 5 h Dauer
+    Stunde 1: 64 × 0,58 = 37 g/h
+    Stunde 2: 64 × 0,92 = 59 g/h
+    Stunde 3: 64 × 1,13 = 72 g/h
+    Stunde 4: 64 × 1,38 = 88 g/h
+    Stunde 5: 64 × 1,50 = 90 g/h (gekappt)
+
+Z4/Z5-Sonderfall – GI-Paradox:
+    Bei hoher Intensität ist der Carb-Bedarf zwar maximal, der Darmblutfluss
+    sinkt aber um bis zu 70 % (splanchnische Vasokonstriktion). Die Multi-
+    plikatoren für Z4/Z5 bleiben deshalb bei 1,0 und die Obergrenze ist
+    fest auf 90 g/h gedeckelt. Empfehlung: flüssige Form (Gels) bevorzugen,
+    Carbs vor dem Hochintensitäts-Block vorladen.
+
+Warum relative Multiplikatoren statt fester g/h-Werte:
+    Frühere Versionen nutzten eine absolute Matrix mit festen g/h-Empfeh-
+    lungen. Diese ignorierte die individuelle Basisintensität und ergab bei
+    niedrigem Verbrauch (z. B. Z2) inkonsistente Werte (Stunde-5-Empfehlung
+    überstieg den tatsächlichen Verbrauch). Der relative Ansatz garantiert,
+    dass die progressive Empfehlung immer im Verhältnis zum echten Bedarf
+    bleibt – und cap-gesichert bei 90 g/h.
+
+
+1i) Ernährungs-Strategie: Progressiv vs. Konstant
+───────────────────────────────────────────────────
+Für Einheiten ≥ 45 min kann zwischen zwei Strategien gewählt werden:
+
+  PROGRESSIV (Standard, wissenschaftlich empfohlen):
+    Die Carb-Zufuhr steigt über die Zeit nach den Multiplikatoren aus 1h.
+    Vorteil: berücksichtigt die natürliche Verschiebung von Speicher-
+    zu Nahrungsenergie und schont anfangs den Darm (geringere Zufuhr
+    bei voller GI-Belastung am Anfang der Fahrt).
+
+  KONSTANT (alternative Praxisstrategie):
+    Der Nutzer wählt eine feste Zufuhr (30–90 g/h), die jede Stunde
+    aufgenommen wird. Standardwert = der zonen-/wattbasierte Bedarf.
+    Vorteil: einfacher umzusetzen, klarer Rhythmus, optimal wenn die
+    Aufnahme von Minute 1 an der Verbrennungsrate entspricht.
+
+Physiologische Bewertung:
+    Beide Strategien sind valide. Bei perfekter Zufuhr = Verbrauch (Konstant)
+    bleiben die Glykogenspeicher stabil (Glycogen Sparing). In der Praxis
+    ist der progressive Plan jedoch oft realistischer, weil:
+    - Der Darm in den ersten Minuten weniger toleriert (Gut-Training nötig)
+    - Hunger und Appetit anfangs gering sind
+    - Die initiale Belastung leicht wirkt → man isst instinktiv weniger
+
+
+1j) Glykogen-Speicherbilanz
+─────────────────────────────
+Schätzt, wie sich die körpereigenen Glykogenspeicher über die Belastung
+entwickeln.
+
+Speichergröße (g/kg Körpergewicht, geschlechts- und trainingsspezifisch):
+    Männer untrainiert:   8 g/kg
+    Männer trainiert:    12 g/kg
+    Männer ausdauer-spez.: 15 g/kg
+    Frauen untrainiert:   7 g/kg
+    Frauen trainiert:    11 g/kg
+    Frauen ausdauer-spez.:14 g/kg
+
+    speicher_voll_g = koerpergewicht_kg × g/kg
+    speicher_start_g = speicher_voll_g × start_voll_pct
+
+Start-Füllstand (Slider 50–100 %):
+    100 % = perfekt vorbereitet (Carbo-Loading 2–3 Tage)
+    80–90 % = normal gegessen, kein Loading
+    60–70 % = nüchterner Start oder schlechte Erholung
+
+Stundenweise Bilanz – Kernlogik:
+    Pro Stunde h:
+      verbrauch_h = verbrauch_eff × drift_multiplikator(h)
+      zufuhr_h    = progressive_plan[h] × zufuhr_skalar  (oder konstanter Wert)
+
+      # WICHTIG: Während der Fahrt können Speicher nicht aufgefüllt werden.
+      # Überschuss (Zufuhr > Verbrauch) wird oxidiert, nicht gespeichert.
+      zufuhr_effektiv = min(zufuhr_h, verbrauch_h)
+      defizit         = verbrauch_h − zufuhr_effektiv
+      speicher_rest  -= defizit
+      speicher_rest   = max(0, min(speicher_start_g, speicher_rest))
+
+Physiologische Korrektheit:
+    Die Glykogensynthese erfordert Insulin und ist während Belastung
+    supprimiert. Aufgenommene Kohlenhydrate werden während der Fahrt
+    nahezu ausschließlich oxidiert, nicht eingelagert (Jeukendrup &
+    Gleeson, Sport Nutrition 3. Auflage). Das Modell bildet das ab:
+    - Bei zufuhr_h ≥ verbrauch_h: kein Defizit, Speicher bleibt stabil
+    - Bei zufuhr_h < verbrauch_h: Differenz aus Speichern
+    - Niemals: Speicher steigt über Startwert
+
+HM-Bonus-Berücksichtigung:
+    Der Höhenmeter-Bonus (Abschnitt 1e) wird gleichmäßig über die Dauer
+    verteilt und auf den stündlichen verbrauch_eff addiert:
+        verbrauch_eff = carbs_pro_h_roh + hm_bonus_g / dauer_h
+
+Zonen (Speicher-Restanteil):
+    > 70 % : 🟢 komfortabel
+    50–70 %: 🟡 eng kalkuliert
+    30–50 %: 🟠 kritisch
+    < 30 % : 🔴 Hungerast-Risiko
+    < 15 % : ⛔ akute Leistungseinbrüche zu erwarten
+
+Empfehlungs-Logik:
+    Bei End-Speicher < 50 % wird eine Warnung mit Mindest-Zufuhr-Empfehlung
+    angezeigt:
+        zufuhr_noetig_pro_h = verbrauch_eff − (speicher_voll × 0,35) / dauer_h
+    (erlaubt 65 % Speicher-Verbrauch über die Dauer als sichere Reserve)
+
+
+1k) Cardiac Drift – automatische Berechnung (ab 2 h)
+──────────────────────────────────────────────────────
+Definition:
+    Bei gleicher Wattzahl steigt die Herzfrequenz über Zeit durch
+    Dehydrierung, Plasmavolumen-Reduktion und Kerntemperatur-Anstieg.
+    Folge: Der Respiratory Exchange Ratio (RER) verschiebt sich Richtung
+    Kohlenhydrat-Oxidation – der Körper verbrennt mehr Carbs pro Stunde,
+    obwohl die mechanische Leistung gleich bleibt.
+
+Quellen:
+    Coyle & González-Alonso (2001): Kardiovaskulärer Drift bei Ausdauer
+    Wingo et al. (2012): Drift und Intensitätsabhängigkeit
+    Lafrenz et al. (2008): Hitze, Dehydrierung und HR-Drift
+    González-Alonso et al. (1998): Plasmavolumen-Effekte
+
+Aktivierung:
+    Ab Dauer ≥ 2 h wird Cardiac Drift automatisch eingerechnet.
+    Bei kürzeren Einheiten ist der Effekt vernachlässigbar.
+
+Modell – Drift-Multiplikator pro Stunde:
+    verbrauch(stunde) = verbrauch_basis × (1 + drift_rate × (stunde − 1))
+
+    Stunde 1: × 1,00 (Referenz)
+    Stunde 2: × (1 + 1×drift_rate)
+    Stunde 3: × (1 + 2×drift_rate)
+    …
+
+Auto-Drift-Rate:
+    Die Rate wird aus drei Eingaben kombiniert:
+
+    BASIS-RATE (aus Temperatur):
+        < 15°C       → 2,0 %/h  (kühl, geringer Drift)
+        15–25°C      → 3,5 %/h  (moderat)
+        25–32°C      → 5,0 %/h  (warm)
+        > 32°C       → 7,0 %/h  (heiß)
+
+    INDOOR-ZUSCHLAG:
+        Indoor (kein Fahrtwind) → +2,0 %/h
+        Begründung: keine Verdunstungskühlung, stärkerer
+        Kerntemperatur-Anstieg
+
+    ZONEN-MULTIPLIKATOR (Intensitätseffekt):
+        Z1  → × 0,7  (niedriger Drift, viel Fettstoffwechsel)
+        Z2  → × 1,0  (Baseline-Referenz)
+        Z3  → × 1,4  (Schwellenbereich, spürbar)
+        Z4  → × 1,8  (hohe Wärmelast, schnelle Glykogendepletion)
+        Z5  → × 2,0  (maximaler Drift)
+        Mix → × 1,2
+
+    FORMEL:
+        drift_rate = (basis_rate + indoor_zuschlag) × zonen_multiplikator
+
+Beispiele:
+    Z2, 18°C, Outdoor                : (3,5 + 0) × 1,0 = 3,5 %/h
+    Z2, 20°C, Indoor (Rolle)         : (3,5 + 2,0) × 1,0 = 5,5 %/h
+    Z3, 24°C, Outdoor (Marathon)     : (3,5 + 0) × 1,4 = 4,9 %/h
+    Z4, 28°C, Outdoor (Renn-Block)   : (5,0 + 0) × 1,8 = 9,0 %/h
+    Z5, 30°C, Outdoor                : (5,0 + 0) × 2,0 = 10,0 %/h
+
+Konkretes Rechenbeispiel:
+    130 W, Z2, 5 h, 18°C, Outdoor → carbs_pro_h = 64 g/h, drift = 3,5 %/h
+    Stunde 1: 64,0 g/h
+    Stunde 2: 64 × 1,035 = 66,2 g/h
+    Stunde 3: 64 × 1,070 = 68,5 g/h
+    Stunde 4: 64 × 1,105 = 70,7 g/h
+    Stunde 5: 64 × 1,140 = 73,0 g/h
+    Summe Verbrauch: ~342 g (statt 320 g ohne Drift)
+
+Manuelle Überschreibung:
+    Im Expander "Drift-Rate manuell anpassen" kann der Wert zwischen
+    0–15 %/h gesetzt werden:
+    - 0 % = Drift deaktivieren (z. B. wenn perfekt hydriert + adaptiert)
+    - Höhere Werte = persönliche Faktoren (schlechte Hitzeadaption,
+      Dehydrierung, untrainiert)
+
+Auswirkung auf die Bilanz:
+    Mit aktivem Drift zeigt die Speicherbilanz-Tabelle eine zusätzliche
+    Spalte "Verbr. g/h 🫀" mit dem stündlich steigenden Verbrauch.
+    Die Metric-Anzeige wechselt von "Verbrauch X g/h" zu
+    "Verbrauch Stunde 1 → Ende: X → Y g/h".
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -732,10 +953,122 @@ Ergebnis: NP ist bei gleichmäßiger Fahrt ≈ Average Power.
      → systematische Unterschätzung des Carb-Bedarfs bei variablen Fahrten
 
 
+────────────────────────────────────────────────────────────────────────────────
+  13. INDOOR-MODUS (Rolle / Heimtrainer)
+────────────────────────────────────────────────────────────────────────────────
+
+13a) Aktivierung & UI-Anpassungen
+───────────────────────────────────
+Über einen Radio-Toggle "Trainingsmodus" am Anfang der Eingaben kann
+Indoor-Training explizit ausgewählt werden. Wird Indoor gewählt, blendet
+das Skript folgende Eingaben aus, weil sie inhaltlich nicht relevant sind:
+
+  - GPX-Upload (keine Route auf der Rolle)
+  - Streckendaten (Distanz, Höhenmeter)
+  - Wetter-Sektion (kein Wetter relevant)
+  - Sonnenstärke
+  - Frühstart-Option (irrelevant ohne Tageszeit-Wetter)
+  - Resupply-Stopps (keine Stopps in der Wohnung)
+
+Stattdessen erscheint:
+  - Slider für Raumtemperatur (5–35°C, Standard 20°C)
+  - Indoor-Flag wird automatisch auf True gesetzt
+
+13b) Watt-Eingabe Indoor
+──────────────────────────
+Auf der Rolle (insbesondere im ERG-Modus) ist die Leistung sehr gleichmäßig.
+Average Power und Normalized Power sind dort praktisch identisch.
+
+Konsequenzen im Indoor-Modus:
+  - Watt-Label wechselt von "Normalized Power / NP" zu "Watt
+    (Durchschnittsleistung)"
+  - Help-Text erklärt: "Indoor-Training: Durchschnittsleistung =
+    Normalized Power (kein Unterschied bei gleichmäßiger Belastung)."
+  - Der NP-Tipp-Hinweis (sonst angezeigt) wird unterdrückt
+
+13c) Schweißrate Indoor
+─────────────────────────
+Indoor wird der Faktor ×1,30 auf die Basisschweißrate angewendet (siehe
+Abschnitt 3b), weil:
+  - Kein Fahrtwind → keine Verdunstungskühlung
+  - Höhere Hauttemperatur → mehr Schwitzen zur Wärmeabgabe
+  - Studien zeigen 20–40 % höhere Schweißraten indoor bei gleicher Last
+
+13d) Cardiac Drift Indoor
+───────────────────────────
+Indoor wird zusätzlich +2 %/h auf die Cardiac-Drift-Rate addiert (siehe
+Abschnitt 1k):
+  - Fehlende Konvektionskühlung führt zu schnellerem Kerntemperatur-Anstieg
+  - Folge: ausgeprägterer Drift, höherer Carb-Bedarf gegen Ende
+  - Bei 4-h-Rollentraining in Z2 bei 20°C: Drift = 5,5 %/h
+    (statt 3,5 %/h outdoor)
+
+13e) Was bleibt unverändert
+─────────────────────────────
+  - Carb-Berechnung aus Watt/Zone (Abschnitt 1)
+  - Progressive Plan und Konstant-Option (1h, 1i)
+  - Glykogen-Speicherbilanz (1j)
+  - Gel-Rezept (Abschnitt 2)
+  - Koffein (Abschnitt 4)
+  - Elektrolyte (Abschnitt 5)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  14. ÜBERSICHT NEUER PHYSIOLOGISCHER MODELLE
+────────────────────────────────────────────────────────────────────────────────
+
+Damit die Verzahnung der erweiterten Modelle klar wird, hier ein Überblick
+über den Berechnungsfluss bei Einheiten ≥ 2 h:
+
+  1. Eingaben: Profil, Dauer, Zone, Temperatur, Indoor/Outdoor, Watt/HF
+                ↓
+  2. carbs_pro_h berechnen:
+       - Watt-Modus:  berechne_carbs_pro_h_aus_watt(watt, ftp) → kontinuierlich
+       - HF/Zone:     CARBS_PRO_STUNDE[zone] → diskrete Stufe
+                ↓
+  3. Progressive Plan generieren (1h):
+       prog_plan[stunde] = min(carbs_pro_h × multiplikator[zone, kum_min], 90)
+                ↓
+  4. Ernährungs-Strategie wählen (1i):
+       - Progressiv → prog_plan wird verwendet
+       - Konstant   → fester g/h-Wert (Slider) für alle Stunden
+                ↓
+  5. Cardiac Drift einberechnen (1k):
+       drift_rate = (basis_rate(temp) + indoor_zuschlag) × zonen_multiplikator
+                ↓
+  6. Glykogen-Speicherbilanz pro Stunde (1j):
+       verbrauch_h(t) = verbrauch_eff × (1 + drift_rate × (t-1))
+       defizit(t)     = max(0, verbrauch_h - zufuhr_h)
+       speicher(t)    = max(0, min(speicher_start, speicher(t-1) - defizit))
+                ↓
+  7. Visualisierung:
+       - Progressive Tabelle (wenn aktiv)
+       - Bilanz-Metrics + stundenweise Tabelle + Speicherkurve
+       - Drift-Spalte "Verbr. g/h 🫀" (wenn drift_rate > 0)
+
+
 Quellen:
   - Coggan A. (2003): Normalized Power – originale Beschreibung
-  - Jeukendrup A. (2014): A Step Towards Personalized Sports Nutrition, Sports Med
-  - Barr et al. (1991), Med Sci Sports Exerc: Geschlechtsdifferenzen Schweißrate
+  - Jeukendrup A. (2014): A Step Towards Personalized Sports Nutrition,
+    Sports Med – Progressive Carb-Strategie
+  - Jeukendrup A. & Gleeson M. (3. Auflage): Sport Nutrition – Glykogen-
+    physiologie während Belastung
+  - Vøllestad N. K. & Blom P. C. (1985), Acta Physiol Scand: Glykogen-
+    depletion in einzelnen Muskelfasern bei Ausdauerbelastung
+  - Gonzalez J. T. & van Loon L. J. C. (2016): Liver glycogen metabolism
+    during exercise
+  - Impey S. G. & Morton J. P. (2018): Fuel for the work required –
+    Periodisierung der Kohlenhydratzufuhr
+  - Coyle E. F. & González-Alonso J. (2001), Exerc Sport Sci Rev:
+    Kardiovaskulärer Drift bei längeren Ausdauerbelastungen
+  - González-Alonso J. et al. (1998), J Appl Physiol: Dehydrierung und
+    kardiovaskuläre Funktion
+  - Wingo J. E. et al. (2012), Sports Med: Cardiovascular Drift und
+    Intensität – Zusammenhang
+  - Lafrenz A. J. et al. (2008), Med Sci Sports Exerc: Hitze, Dehydrierung
+    und Cardiac Drift
+  - Barr et al. (1991), Med Sci Sports Exerc: Geschlechtsdifferenzen
+    Schweißrate
   - Kenefick et al. (2012), J Appl Physiol: Schweißrate und Alter
   - Inoue et al. (1999), J Appl Physiol: Alterseffekte auf Schweißdrüsen
   - Shirreffs & Maughan (1997): Schweiß-Natriumkonzentration und Geschlecht
