@@ -3148,6 +3148,276 @@ genauer als die Pauschalrechnung.
                         else:
                             st.caption("Keine Station im 25-km-Fenster vor diesem Stopp gefunden (Radius 500 m zur Route).")
 
+    # ── Expertenansicht: alle Berechnungen offenlegen ──
+    st.divider()
+    with st.expander("🔬 Expertenansicht — wie wurde das alles berechnet?", expanded=False):
+        st.caption(
+            "Vollständige Offenlegung aller Zwischenschritte. Für Sportler/innen, "
+            "die genau verstehen wollen, woher jede Zahl im Plan kommt. "
+            "Alle Formeln und Quellen findest du in `BERECHNUNGEN_UND_APIS.txt`."
+        )
+
+        # ───────────────────────────────────────────
+        # 1. CARB-VERBRENNUNG (carbs_pro_h)
+        # ───────────────────────────────────────────
+        st.markdown("### 1. Carb-Verbrennung pro Stunde (`carbs_pro_h`)")
+        carb_quelle = e["carbs"]["quelle"]
+        carbs_h = e["carbs"]["pro_h"]
+        st.markdown(f"**Quelle:** {carb_quelle}")
+
+        if e.get("watt") and e.get("ftp"):
+            watt_e = e["watt"]
+            ftp_e = e["ftp"]
+            pct_ftp = round(watt_e / ftp_e * 100, 1)
+            kcal_h = round((watt_e * 3600) / (4180 * 0.22))
+            if pct_ftp < 55:
+                kh_anteil = 0.35
+                ftp_label = "< 55% FTP → Regeneration"
+            elif pct_ftp < 75:
+                kh_anteil = 0.50
+                ftp_label = "55–75% FTP → Grundlage"
+            elif pct_ftp < 90:
+                kh_anteil = 0.72
+                ftp_label = "75–90% FTP → Tempo"
+            elif pct_ftp < 105:
+                kh_anteil = 0.87
+                ftp_label = "90–105% FTP → Schwelle"
+            else:
+                kh_anteil = 0.95
+                ftp_label = "> 105% FTP → maximal"
+
+            st.markdown(
+                f"**Eingabe:** {watt_e:.0f} W bei FTP {ftp_e:.0f} W → "
+                f"**{pct_ftp}% FTP** ({ftp_label})\n\n"
+                f"**Schritt 1 — Kalorien/h** (Wirkungsgrad 22%):  \n"
+                f"`kcal/h = (Watt × 3600) / (4180 × 0,22)`  \n"
+                f"`= ({watt_e:.0f} × 3600) / (4180 × 0,22)`  \n"
+                f"`= {kcal_h} kcal/h`\n\n"
+                f"**Schritt 2 — KH-Anteil:** {int(kh_anteil*100)} % "
+                f"(intensitätsabhängig)\n\n"
+                f"**Schritt 3 — Carbs/h** (4 kcal/g):  \n"
+                f"`Carbs/h = (kcal/h × KH-Anteil) / 4`  \n"
+                f"`= ({kcal_h} × {kh_anteil}) / 4`  \n"
+                f"`= {round((kcal_h * kh_anteil) / 4)} g/h` → "
+                f"**{carbs_h} g/h** (Cap 120 g/h)"
+            )
+        else:
+            # HF- oder Zonen-Modus → CARBS_PRO_STUNDE-Lookup
+            st.markdown(
+                f"**Modus:** ohne Wattmessung → Festwert aus Zone {e['zone']}: "
+                f"**{carbs_h} g/h** "
+                f"(Tabelle: Z1=30, Z2=60, Z3=75, Z4=90, Z5=90, Mix=70 g/h)"
+            )
+
+        # Höhenmeter-Bonus
+        if e.get("hoehenmeter"):
+            hm_bonus = e["carbs"]["hm_bonus"]
+            st.markdown(
+                f"**Höhenmeter-Bonus:** {e['hoehenmeter']} Hm × (8 g / 100 Hm) "
+                f"= **+{hm_bonus} g** (verteilt auf {e['dauer_h']} h)"
+            )
+
+        # ───────────────────────────────────────────
+        # 2. PROGRESSIVER STUNDENPLAN
+        # ───────────────────────────────────────────
+        prog = e["carbs"].get("progressiv", [])
+        if prog and len(prog) > 1:
+            st.markdown("### 2. Progressiver Stundenplan (relative Multiplikatoren)")
+            zone_e = e["zone"]
+            st.markdown(
+                f"**Basis:** carbs_pro_h = {carbs_h} g/h, Zone {zone_e}, "
+                f"Dauer {e['dauer_h']} h\n\n"
+                "**Formel pro Stunde:**  \n"
+                "`rate = min(carbs_pro_h × multiplikator[zone, kum_min], 90)`"
+            )
+            rows = []
+            for s in prog:
+                mult = round(s["carbs_g_h"] / carbs_h, 2) if carbs_h > 0 else 1.0
+                rows.append({
+                    "Stunde": s["stunde"],
+                    "kum. Minute": f"{s['start_min']}–{s['end_min']}",
+                    "Multiplikator": f"× {mult}",
+                    "Rechnung": f"{carbs_h} × {mult} = {s['carbs_g_h']} g/h",
+                    "Menge (g)": s["carbs_g"],
+                })
+            st.table(rows)
+            st.caption(
+                "Quelle: Jeukendrup 2014, Vøllestad & Blom 1985, Gonzalez & van Loon 2016, "
+                "Impey & Morton 2018. Cap bei 90 g/h (intestinale Aufnahmegrenze)."
+            )
+
+        # ───────────────────────────────────────────
+        # 3. CARDIAC DRIFT
+        # ───────────────────────────────────────────
+        if e["dauer_h"] >= 2:
+            st.markdown("### 3. Cardiac Drift — Aufschlüsselung")
+            temp_e = e["temp"]
+            # Basis aus Temperatur
+            if temp_e < 15:
+                base_rate, base_label = 0.020, "kühl (<15°C)"
+            elif temp_e < 25:
+                base_rate, base_label = 0.035, "moderat (15–25°C)"
+            elif temp_e < 32:
+                base_rate, base_label = 0.050, "warm (25–32°C)"
+            else:
+                base_rate, base_label = 0.070, "heiß (>32°C)"
+            indoor_extra = 0.020 if ist_indoor else 0.0
+            zone_mult_dict = {"Z1": 0.7, "Z2": 1.0, "Z3": 1.4, "Z4": 1.8, "Z5": 2.0, "Mix": 1.2}
+            zone_mult = zone_mult_dict.get(e["zone"], 1.0)
+            final_rate = (base_rate + indoor_extra) * zone_mult
+
+            st.markdown(
+                f"**Basis-Rate** (aus Temperatur {temp_e}°C, {base_label}): "
+                f"`{base_rate*100:.1f}%/h`\n\n"
+                f"**Indoor-Zuschlag** ({'Indoor' if ist_indoor else 'Outdoor'}): "
+                f"`+{indoor_extra*100:.1f}%/h`\n\n"
+                f"**Zonen-Multiplikator** (Zone {e['zone']}): `× {zone_mult}`\n\n"
+                f"**Formel:**  \n"
+                f"`drift = (basis_rate + indoor_zuschlag) × zonen_multiplikator`  \n"
+                f"`= ({base_rate:.3f} + {indoor_extra:.3f}) × {zone_mult}`  \n"
+                f"`= {final_rate:.3f}` → **{final_rate*100:.1f}%/h** (Auto-Schätzung)"
+            )
+            if abs(drift_rate - final_rate) > 0.0005:
+                st.markdown(
+                    f"⚙️ Du hast die Drift-Rate manuell auf "
+                    f"**{drift_rate*100:.0f}%/h** angepasst."
+                )
+
+            verbrauch_basis = bilanz["verbrauch_eff_pro_h"]
+            st.markdown(
+                "**Stündliche Verbrauchssteigerung:**  \n"
+                "`verbrauch(stunde) = verbrauch_basis × (1 + drift × (stunde − 1))`"
+            )
+            drift_rows = []
+            for i in range(int(e["dauer_h"])):
+                mult_i = 1 + drift_rate * i
+                drift_rows.append({
+                    "Stunde": i + 1,
+                    "Multiplikator": f"× {mult_i:.3f}",
+                    "Verbrauch g/h": f"{verbrauch_basis * mult_i:.1f}",
+                })
+            st.table(drift_rows)
+            st.caption(
+                "Quelle: Coyle & González-Alonso 2001, Wingo et al. 2012, "
+                "Lafrenz et al. 2008."
+            )
+
+        # ───────────────────────────────────────────
+        # 4. GLYKOGEN-SPEICHER
+        # ───────────────────────────────────────────
+        st.markdown("### 4. Glykogen-Speicher")
+        st.markdown(
+            f"**Körpergewicht:** {bilanz['koerpergewicht_kg']} kg  \n"
+            f"**Geschlecht / Trainingsstatus:** {bilanz['geschlecht']} / "
+            f"{bilanz['trainings_status']}  \n"
+            f"**Spezifische Speichergröße:** {bilanz['g_pro_kg']} g/kg "
+            "(aus Tabelle, geschlechts- und trainingsspezifisch)\n\n"
+            f"**Speicher voll:** `{bilanz['koerpergewicht_kg']} kg × "
+            f"{bilanz['g_pro_kg']} g/kg = {bilanz['speicher_voll_g']} g`  \n"
+            f"**Speicher Start:** `{bilanz['speicher_voll_g']} g × "
+            f"{int(start_voll_pct*100)} % = {bilanz['speicher_start_g']} g`"
+        )
+        st.caption(
+            "Physiologie: Glykogen kann während der Belastung NICHT aufgefüllt werden "
+            "(Insulin supprimiert, GLUT4 inaktiv). Überschuss aus Nahrung wird oxidiert. "
+            "Quelle: Jeukendrup & Gleeson, Sport Nutrition 3. Aufl."
+        )
+
+        # ───────────────────────────────────────────
+        # 5. WASSER / SCHWEISS
+        # ───────────────────────────────────────────
+        st.markdown("### 5. Schweißrate & Wasser")
+        wasser_h = e["wasser"]["pro_h"]
+        ga_faktor = geschlecht_alter_wasser_faktor(profil)
+        intensitaet_f = INTENSITAETS_FAKTOR.get(e["zone"], 1.0)
+        indoor_f = 1.30 if ist_indoor else 1.0
+        basis_ml = get_schweissrate_ml_h(profil, e["temp"])
+
+        # Residual = sonne_f × fruehstart_f (Werte sind nicht direkt im Ergebnis gespeichert)
+        bekannt_faktor = intensitaet_f * indoor_f * ga_faktor
+        residual = (wasser_h / basis_ml / bekannt_faktor) if basis_ml > 0 and bekannt_faktor > 0 else 1.0
+
+        st.markdown(
+            f"**Schritt 1 — Basisrate** aus Schweißtyp-Preset "
+            f"`{profil['schweissrate']['preset']}` bei {e['temp']}°C: "
+            f"**{basis_ml} ml/h**\n\n"
+            f"**Schritt 2 — Faktoren (Multiplikator-Stapel):**  \n"
+            f"- Intensität (Zone {e['zone']}): × {intensitaet_f}  \n"
+            f"- Indoor: × {indoor_f}  \n"
+            f"- Geschlecht & Alter: × {ga_faktor:.2f}  \n"
+            f"- Sonne + Frühstart (kombiniert): × {residual:.2f}\n\n"
+            f"**Schritt 3 — Endergebnis:**  \n"
+            f"`{basis_ml} × {intensitaet_f} × {indoor_f} × {ga_faktor:.2f} × "
+            f"{residual:.2f}`  \n"
+            f"`≈ {wasser_h} ml/h` × {e['dauer_h']} h "
+            f"= **{e['wasser']['gesamt']} ml** gesamt"
+        )
+        st.caption(
+            "Sonne (× 1.0/1.1/1.2 je nach Bedeckung) und Frühstart (× 0.9) sind "
+            "im residuellen Faktor zusammengefasst, da sie nicht einzeln im "
+            "Ergebnis-Dictionary gespeichert werden."
+        )
+
+        # ───────────────────────────────────────────
+        # 6. GEL-REZEPT (Malto:Fructose)
+        # ───────────────────────────────────────────
+        sf_data = e.get("softflasks", {})
+        ratio_info = sf_data.get("ratio_info")
+        if ratio_info and sf_data.get("flaschen"):
+            st.markdown("### 6. Gel-Rezept (Malto:Fructose-Verhältnis)")
+            malto_r, fruct_r, ratio_label = ratio_info
+            st.markdown(
+                f"**Entscheidungsregel** (Jeukendrup 2014):  \n"
+                f"≤ 60 g/h → nur Malto · 60–80 → 2:1 · 80–100 → 5:4 · > 100 → 1:1\n\n"
+                f"**Bei deinen {carbs_h} g/h:** {ratio_label}  \n"
+                f"→ Malto-Anteil: {malto_r} · Fructose-Anteil: {fruct_r}"
+            )
+            for f in sf_data["flaschen"]:
+                r = f.get("rezept", {})
+                st.markdown(
+                    f"**{f['name']} ({f['volumen_ml']} ml, {f['anzahl']}× mitgenommen):**  \n"
+                    f"- Carbs pro Flask: {f['carbs_pro_flask']} g  \n"
+                    f"- Maltodextrin: {r.get('maltodextrin', 0)} g · "
+                    f"Fructose: {r.get('fructose', 0)} g  \n"
+                    f"- Salz: {r.get('salz', 0)} g · Wasser: {r.get('wasser', 0)} ml"
+                )
+
+        # ───────────────────────────────────────────
+        # 7. KOFFEIN
+        # ───────────────────────────────────────────
+        koff = e.get("koffein", {})
+        if koff and koff.get("kapseln", 0) > 0:
+            st.markdown("### 7. Koffein-Plan")
+            st.markdown(
+                f"**Logik:** Dauer ≥ 2 h → 1 Cap nach Stunde 2 · "
+                f"≥ 4 h → 2 Caps · ≥ 6 h → 4 Caps · > 8 h → 5 Caps  \n"
+                f"**Dauer {e['dauer_h']} h:** {koff.get('kapseln', 0)} Kapseln  \n"
+                f"**Plan:** {koff.get('plan', '—')}  \n"
+                f"**Menge pro Cap:** {profil.get('koffein_pro_cap_mg', 50)} mg "
+                f"= **{koff.get('gesamt_mg', 0)} mg** gesamt"
+            )
+
+        # ───────────────────────────────────────────
+        # 8. VERTEILUNG GELS vs. RIEGEL
+        # ───────────────────────────────────────────
+        st.markdown("### 8. Verteilung Carbs auf Gels & Riegel")
+        gel_anteil = profil["softflask"]["gel_anteil_pct"]
+        st.markdown(
+            f"**Profil-Einstellung:** {gel_anteil} % aus Gels, "
+            f"{100 - gel_anteil} % aus Riegeln\n\n"
+            f"**Berechnung:**  \n"
+            f"- Carbs gesamt: {e['carbs']['gesamt']} g  \n"
+            f"- Aus Gels: {e['carbs']['gesamt']} × {gel_anteil}% = "
+            f"**{e['carbs']['aus_gels']} g**  \n"
+            f"- Aus Riegeln: {e['carbs']['gesamt']} − {e['carbs']['aus_gels']} = "
+            f"**{e['carbs']['aus_riegeln']} g**"
+        )
+
+        st.info(
+            "💡 Alle Formeln, Quellenangaben und wissenschaftliche Begründungen "
+            "findest du in der Datei `BERECHNUNGEN_UND_APIS.txt` im GitHub-Repository."
+        )
+
     # ── Download ──
     st.divider()
     wp  = st.session_state.get("wetter_punkte", [])
