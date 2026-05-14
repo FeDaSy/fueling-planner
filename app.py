@@ -255,20 +255,24 @@ def speicher_zone(prozent):
 
 def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
                              hm_bonus_g=0, start_voll_pct=1.0,
-                             progressive_plan=None, zufuhr_skalar=1.0):
+                             progressive_plan=None, zufuhr_skalar=1.0,
+                             cardiac_drift_rate=0.0):
     """
     Berechnet die kumulative Glykogen-Speicherbilanz stundenweise.
 
     Args:
         profil: Nutzerprofil (für Körpergewicht & Trainingsstatus)
         dauer_h: Gesamtdauer in Stunden (float)
-        verbrauch_pro_h: physiologischer KH-Verbrauch in g/h
+        verbrauch_pro_h: physiologischer KH-Verbrauch in g/h (Basiswert, Stunde 1)
         zufuhr_pro_h: tatsächliche KH-Zufuhr in g/h (Fallback wenn kein progressive_plan)
         hm_bonus_g: zusätzlicher KH-Verbrauch aus Höhenmetern (gesamt, wird verteilt)
         start_voll_pct: Speicherfüllstand zu Beginn (0..1)
         progressive_plan: optionale Liste aus berechne_progressive_carbs_plan()
                           mit stündlichen Zufuhrmengen; überschreibt zufuhr_pro_h.
         zufuhr_skalar: Skalierungsfaktor für progressive Zufuhr (z.B. 0.8 = 80% des Plans).
+        cardiac_drift_rate: zusätzlicher KH-Verbrauch pro Stunde als Anteil des Basiswerts
+                            (z.B. 0.04 = +4%/h). Modelliert steigenden RER durch Cardiac Drift.
+                            Stunde 1: ×1.0, Stunde 2: ×(1+rate), Stunde 3: ×(1+2×rate), …
 
     Returns:
         dict mit Start-Speicher, stundenweisem Verlauf, kritischer Stunde, Empfehlungen.
@@ -301,30 +305,38 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
     schritt_idx = 0
     while h < dauer_h - 1e-6:
         schritt = min(1.0, dauer_h - h)
-        verbrauch_h = verbrauch_eff * schritt
+
+        # Cardiac Drift: Verbrauch steigt pro Stunde um cardiac_drift_rate × Basiswert.
+        # Stunde 1 (schritt_idx=0): kein Drift. Stunde 2: +1×rate. Stunde 3: +2×rate. …
+        # Physiologisch: steigender RER durch Dehydrierung & Ermüdung bei gleicher Wattzahl.
+        drift_multiplikator = 1.0 + cardiac_drift_rate * schritt_idx
+        verbrauch_eff_drift = verbrauch_eff * drift_multiplikator
+        verbrauch_h = verbrauch_eff_drift * schritt
+
         # Zufuhr: progressiv wenn vorhanden, sonst flat
         if prog_lookup:
             rate = prog_lookup.get(schritt_idx, list(prog_lookup.values())[-1])
         else:
             rate = zufuhr_pro_h
         zufuhr_h = rate * schritt
+
         # Während der Fahrt können Glykogenspeicher nicht aufgefüllt werden.
         # Überschuss (Zufuhr > Verbrauch) wird oxidiert, nicht gespeichert.
         zufuhr_effektiv_h = min(zufuhr_h, verbrauch_h)
         defizit_h = verbrauch_h - zufuhr_effektiv_h
         speicher_rest -= defizit_h
-        # Speicher kann nicht über 100% gehen (Überzufuhr wird oxidiert, nicht eingelagert)
         # Speicher kann nicht über Startwert steigen (keine Glykogensynthese während Fahrt)
         speicher_rest = max(0, min(speicher_start_g, speicher_rest))
         rest_pct = speicher_rest / speicher_voll_g if speicher_voll_g > 0 else 0
         zone_name, zone_emoji = speicher_zone(rest_pct)
         h_end = h + schritt
-        gedeckt = zufuhr_effektiv_h >= verbrauch_h  # True = Verbrauch vollständig durch Essen gedeckt
+        gedeckt = zufuhr_effektiv_h >= verbrauch_h
         stunden_liste.append({
             "stunde_bis": round(h_end, 2),
             "verbrauch_g": round(verbrauch_h, 1),
-            "zufuhr_g": round(zufuhr_h, 1),          # Was gegessen wird (inkl. Überschuss)
-            "defizit_g": round(defizit_h, 1),          # Was aus Speichern kommt (0 wenn gedeckt)
+            "verbrauch_g_h": round(verbrauch_eff_drift, 1),   # g/h dieser Stunde (für Tabelle)
+            "zufuhr_g": round(zufuhr_h, 1),
+            "defizit_g": round(defizit_h, 1),
             "gedeckt": gedeckt,
             "speicher_rest_g": round(speicher_rest),
             "speicher_rest_pct": round(rest_pct * 100, 1),
@@ -406,6 +418,50 @@ def berechne_glykogen_bilanz(profil, dauer_h, verbrauch_pro_h, zufuhr_pro_h,
         "empfehlungen": empfehlungen,
         "zufuhr_empfohlen_pro_h": zufuhr_noetig_pro_h,
     }
+
+
+def cardiac_drift_rate_auto(temp_c, indoor, zone="Z2"):
+    """
+    Schätzt die Cardiac-Drift-Rate (Anteil des Basisverbrauchs pro Stunde)
+    aus Temperatur, Trainingsumgebung und Intensitätszone.
+
+    Physiologische Grundlage:
+    - Cardiac Drift entsteht durch Dehydrierung (sinkender Blutdruck →
+      kompensatorisch höhere HR) und Hitzeakkumulation (Coyle & González-Alonso 2001).
+    - Indoor ohne Fahrtwind: ~2× stärkere Kerntemperatur-Akkumulation.
+    - Höhere Intensität → mehr Wärmeproduktion, schnellere Plasmavolumen-Depletion,
+      stärkere Glykogen-Entleerung → ausgeprägterer Drift (Wingo et al. 2012,
+      Lafrenz et al. 2008).
+    - Jede 10 bpm HR-Drift ≈ +5–8% RER-shift → +4–6% Carb-Verbrauch/h.
+
+    Rückgabe: float, z.B. 0.03 = +3% Mehrverbrauch pro Stunde.
+    """
+    # Basis aus Temperatur
+    if temp_c < 15:
+        base = 0.02   # kühl: geringer Drift
+    elif temp_c < 25:
+        base = 0.035  # moderat
+    elif temp_c < 32:
+        base = 0.05   # warm
+    else:
+        base = 0.07   # heiß
+    if indoor:
+        base += 0.02  # kein Fahrtwind → mehr Kerntemperatur-Anstieg
+
+    # Intensitäts-Multiplikator
+    # Z1/Z2: niedriger Drift, viel Fettstoffwechsel, geringe Wärmeproduktion
+    # Z3: spürbarer Drift, Schwellenbereich
+    # Z4/Z5: starker Drift durch hohe Wärmelast & schnelle Glykogen-Entleerung
+    zone_mult = {
+        "Z1": 0.7,
+        "Z2": 1.0,    # Baseline-Referenz
+        "Z3": 1.4,
+        "Z4": 1.8,
+        "Z5": 2.0,
+        "Mix": 1.2,
+    }.get(zone, 1.0)
+
+    return round(base * zone_mult, 3)
 
 
 def get_schweissrate_ml_h(profil, temp):
@@ -2603,6 +2659,52 @@ if st.session_state.ergebnis:
             ),
         ) / 100.0
 
+        # ── Cardiac Drift ──
+        drift_rate = 0.0
+        if e["dauer_h"] >= 2:
+            drift_auto = cardiac_drift_rate_auto(e["temp"], ist_indoor, e["zone"])
+            drift_pct_auto = round(drift_auto * 100, 1)
+            # Slider braucht ≥ 1 als min — sehr niedrige Auto-Werte aufrunden
+            drift_pct_default = max(1, int(round(drift_pct_auto)))
+            mit_drift = st.checkbox(
+                "🫀 Cardiac Drift einberechnen",
+                value=False,
+                help=(
+                    "Bei gleichbleibender Wattzahl steigt die Herzfrequenz über Zeit "
+                    "(Dehydrierung + Hitzeakkumulation). Das erhöht den RER und damit "
+                    "den Kohlenhydratverbrauch pro Stunde leicht.\n\n"
+                    "**Physiologische Grundlage:** Coyle & González-Alonso (2001), "
+                    "Wingo et al. (2012) – kardiovaskulärer Drift bei längeren "
+                    "Ausdauerbelastungen, verstärkt durch höhere Intensität.\n\n"
+                    f"Auto-Schätzung für Zone **{e['zone']}**, {e['temp']}°C "
+                    f"{'(Indoor)' if ist_indoor else '(Outdoor)'}: "
+                    f"**+{drift_pct_auto}% pro Stunde**."
+                ),
+            )
+            if mit_drift:
+                drift_rate = st.slider(
+                    "Drift-Rate (% Mehrverbrauch pro Stunde)",
+                    min_value=1, max_value=15,
+                    value=min(15, drift_pct_default),
+                    step=1,
+                    help=(
+                        f"Auto-Schätzung: **{drift_pct_auto}%/h** "
+                        f"(Zone {e['zone']}, {'Indoor' if ist_indoor else 'Outdoor'}, "
+                        f"{e['temp']}°C).\n\n"
+                        "**Zonen-Einfluss:** Z1/Z2: niedriger Drift (gemütliches Tempo). "
+                        "Z3: spürbar (Schwelle). Z4/Z5: starker Drift "
+                        "(hohe Wärmelast + schnelle Glykogen-Entleerung).\n\n"
+                        "**Temperatur-Einfluss:** Kühl: 2–3%. Moderat: 3–5%. "
+                        "Warm: 5–7%. Heiß: 7–10%+."
+                    ),
+                ) / 100.0
+                st.caption(
+                    f"→ Stunde 1: {verbrauch_roh:.0f} g/h | "
+                    f"Stunde 2: {verbrauch_roh*(1+drift_rate):.0f} g/h | "
+                    f"Stunde {int(e['dauer_h'])}: "
+                    f"{verbrauch_roh*(1+drift_rate*(int(e['dauer_h'])-1)):.0f} g/h"
+                )
+
         bilanz = berechne_glykogen_bilanz(
             profil=profil,
             dauer_h=e["dauer_h"],
@@ -2612,6 +2714,7 @@ if st.session_state.ergebnis:
             start_voll_pct=start_voll_pct,
             progressive_plan=prog_plan if hat_progressiv else None,
             zufuhr_skalar=zufuhr_skalar,
+            cardiac_drift_rate=drift_rate,
         )
 
         # Kernmetriken
@@ -2622,12 +2725,24 @@ if st.session_state.ergebnis:
             help=f"{bilanz['koerpergewicht_kg']} kg × {bilanz['g_pro_kg']} g/kg "
                  f"({bilanz['geschlecht']}, {bilanz['trainings_status']})",
         )
-        c2.metric(
-            "Verbrauch (echt)",
-            f"{bilanz['verbrauch_eff_pro_h']:.0f} g/h",
-            help="Physiologischer KH-Verbrauch ohne 120-g-Aufnahme-Cap. "
-                 "Inkl. anteiliger HM-Bonus.",
-        )
+        if drift_rate > 0:
+            verbrauch_end = verbrauch_roh * (1 + drift_rate * (e["dauer_h"] - 1))
+            c2.metric(
+                "Verbrauch Stunde 1 → Ende",
+                f"{bilanz['verbrauch_eff_pro_h']:.0f} → {verbrauch_end:.0f} g/h",
+                help=(
+                    f"Mit Cardiac Drift +{drift_rate*100:.0f}%/h steigt der KH-Verbrauch "
+                    f"von {bilanz['verbrauch_eff_pro_h']:.0f} g/h auf "
+                    f"{verbrauch_end:.0f} g/h in der letzten Stunde."
+                ),
+            )
+        else:
+            c2.metric(
+                "Verbrauch (echt)",
+                f"{bilanz['verbrauch_eff_pro_h']:.0f} g/h",
+                help="Physiologischer KH-Verbrauch ohne 120-g-Aufnahme-Cap. "
+                     "Inkl. anteiliger HM-Bonus.",
+            )
         defizit_pro_h = bilanz["defizit_pro_h"]
         c3.metric(
             "Defizit/h",
@@ -2664,17 +2779,33 @@ if st.session_state.ergebnis:
             )
         zufuhr_spalte = "Zufuhr" if ist_konstant else "Zufuhr ↑"
         stunden = bilanz["stunden"]
-        st.table({
-            "Bis Stunde": [f"{s['stunde_bis']:.1f} h" for s in stunden],
-            "Verbrauch": [f"{s['verbrauch_g']:.0f} g" for s in stunden],
-            zufuhr_spalte: [f"{s['zufuhr_g']:.0f} g" for s in stunden],
-            "Aus Glykogen ↓": [
-                "✓ gedeckt" if s["gedeckt"] else f"+{s['defizit_g']:.0f} g"
-                for s in stunden
-            ],
-            "Speicher rest": [f"{s['speicher_rest_g']} g" for s in stunden],
-            "Rest %": [f"{s['emoji']} {s['speicher_rest_pct']:.0f} %" for s in stunden],
-        })
+        # Mit Drift: eigene g/h-Spalte zeigen, damit der Anstieg sichtbar ist
+        if drift_rate > 0:
+            tabelle = {
+                "Bis Stunde": [f"{s['stunde_bis']:.1f} h" for s in stunden],
+                "Verbr. g/h 🫀": [f"{s['verbrauch_g_h']:.0f} g/h" for s in stunden],
+                "Verbrauch": [f"{s['verbrauch_g']:.0f} g" for s in stunden],
+                zufuhr_spalte: [f"{s['zufuhr_g']:.0f} g" for s in stunden],
+                "Aus Glykogen ↓": [
+                    "✓ gedeckt" if s["gedeckt"] else f"+{s['defizit_g']:.0f} g"
+                    for s in stunden
+                ],
+                "Speicher rest": [f"{s['speicher_rest_g']} g" for s in stunden],
+                "Rest %": [f"{s['emoji']} {s['speicher_rest_pct']:.0f} %" for s in stunden],
+            }
+        else:
+            tabelle = {
+                "Bis Stunde": [f"{s['stunde_bis']:.1f} h" for s in stunden],
+                "Verbrauch": [f"{s['verbrauch_g']:.0f} g" for s in stunden],
+                zufuhr_spalte: [f"{s['zufuhr_g']:.0f} g" for s in stunden],
+                "Aus Glykogen ↓": [
+                    "✓ gedeckt" if s["gedeckt"] else f"+{s['defizit_g']:.0f} g"
+                    for s in stunden
+                ],
+                "Speicher rest": [f"{s['speicher_rest_g']} g" for s in stunden],
+                "Rest %": [f"{s['emoji']} {s['speicher_rest_pct']:.0f} %" for s in stunden],
+            }
+        st.table(tabelle)
 
         # Diagramm: Speicherverlauf über Zeit
         chart_data = {
