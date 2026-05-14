@@ -506,18 +506,25 @@ def berechne_wasser_pro_stunde(profil, temp, sonne, indoor, zone, frueh_start):
 
 def empfehle_glukose_fructose(carbs_pro_h):
     """
-    Wissenschaftlich empfohlenes Glucose:Fructose-Verhältnis nach Jeukendrup (2014).
-    Basis: SGLT1 transportiert Glucose (max ~60 g/h), GLUT5 transportiert Fructose (max ~50 g/h).
-    Erst ab 60 g/h ist Fructose sinnvoll, weil SGLT1 dann saturiert ist.
+    Wissenschaftlich empfohlenes Glucose:Fructose-Verhältnis.
+
+    Basis (Jeukendrup 2014, Fuchs et al. 2019, Viribay et al. 2020,
+    O'Brien & Rowlands 2011):
+      - SGLT1 transportiert Glucose: max ~60–67 g/h
+      - GLUT5 transportiert Fructose: max ~50 g/h
+      - 2:1 ist der etablierte Standard bis ~90 g/h
+        (60 g Glukose + 30 g Fruktose nutzt SGLT1 vollständig aus)
+      - 1:0.8 (= 5:4) ist die neuere Empfehlung für > 90 g/h, optimal
+        bei sehr hoher Zufuhr (~120 g/h: 67 g Glukose + 53 g Fruktose)
+      - 1:1 wird in der Literatur nicht klar gestützt → wird nicht
+        mehr verwendet
     """
-    if carbs_pro_h <= 60:
+    if carbs_pro_h < 60:
         return (1, 0, "Nur Maltodextrin/Glucose (SGLT1 noch nicht saturiert, Fructose nicht nötig)")
-    elif carbs_pro_h <= 80:
-        return (2, 1, "2:1 Maltodextrin:Fructose (klassisches Verhältnis für 60–80 g/h)")
-    elif carbs_pro_h <= 100:
-        return (5, 4, "~1:0.8 Maltodextrin:Fructose (optimiert für 80–100 g/h, max. Darmaufnahme)")
+    elif carbs_pro_h <= 90:
+        return (2, 1, "2:1 Maltodextrin:Fructose (klassisches Verhältnis für 60–90 g/h, etabliert)")
     else:
-        return (1, 1, "1:1 Maltodextrin:Fructose (maximale Absorption >100 g/h, beide Transporter voll ausgelastet)")
+        return (5, 4, "~1:0.8 Maltodextrin:Fructose (>90 g/h, neuere Forschung, optimal bei ~120 g/h)")
 
 
 def berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h=None, volumen_ml=None):
@@ -2528,9 +2535,29 @@ if st.session_state.ergebnis:
             ),
         )
         gesamt_konstant = round(konstant_g_h * e["dauer_h"])
+
+        # ── Gel-Rezept an gewählte Konstant-Zufuhr anpassen ──
+        # Das Glucose:Fructose-Verhältnis hängt von der tatsächlichen
+        # Carb-Aufnahmerate ab (Jeukendrup 2014):
+        # ≤60 g/h: nur Malto · 60–80: 2:1 · 80–100: 5:4 · >100: 1:1
+        neue_ratio = empfehle_glukose_fructose(konstant_g_h)
+        e["softflasks"]["ratio_info"] = neue_ratio
+        # Alle Flaschen-Rezepte mit neuem Verhältnis neu berechnen
+        for f in e["softflasks"].get("flaschen", []):
+            f["rezept"] = berechne_gel_rezept(
+                profil,
+                f["carbs_pro_flask"],
+                e["temp"],
+                carbs_pro_h=konstant_g_h,
+                volumen_ml=f["volumen_ml"],
+            )
+        if e["softflasks"].get("flaschen"):
+            e["softflasks"]["rezept"] = e["softflasks"]["flaschen"][0]["rezept"]
+
         st.info(
             f"➡️ **Konstante Zufuhr:** {konstant_g_h} g/h × {e['dauer_h']} h "
-            f"= **{gesamt_konstant} g gesamt**"
+            f"= **{gesamt_konstant} g gesamt**  \n"
+            f"🧪 **Gel-Rezept angepasst:** {neue_ratio[2]}"
         )
     else:
         konstant_g_h = None  # wird im Bilanz-Abschnitt per Slider gesetzt
@@ -3370,8 +3397,9 @@ genauer als die Pauschalrechnung.
             st.markdown("### 6. Gel-Rezept (Malto:Fructose-Verhältnis)")
             malto_r, fruct_r, ratio_label = ratio_info
             st.markdown(
-                f"**Entscheidungsregel** (Jeukendrup 2014):  \n"
-                f"≤ 60 g/h → nur Malto · 60–80 → 2:1 · 80–100 → 5:4 · > 100 → 1:1\n\n"
+                f"**Entscheidungsregel** (Jeukendrup 2014, Fuchs et al. 2019, "
+                f"Viribay et al. 2020):  \n"
+                f"< 60 g/h → nur Malto · 60–90 g/h → 2:1 · > 90 g/h → 5:4 (≈1:0.8)\n\n"
                 f"**Bei deinen {carbs_h} g/h:** {ratio_label}  \n"
                 f"→ Malto-Anteil: {malto_r} · Fructose-Anteil: {fruct_r}"
             )

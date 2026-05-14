@@ -406,24 +406,44 @@ Größen und Stückzahlen sind möglich.
 2a) Dynamisches Glucose:Fructose-Verhältnis
 ─────────────────────────────────────────────
 Das optimale Verhältnis hängt von der Carb-Aufnahmerate ab. Basis ist
-die Transporterphysiologie des Darms (Jeukendrup 2014):
+die Transporterphysiologie des Darms:
 
-  - Glucose/Maltodextrin wird über SGLT1 transportiert (max. ca. 60 g/h)
+  - Glucose/Maltodextrin wird über SGLT1 transportiert (max. ca. 60–67 g/h)
   - Fructose wird über GLUT5 transportiert (max. ca. 50 g/h)
 
 Das Skript wählt das Verhältnis automatisch nach Carbs/h:
 
     Carbs/h      Verhältnis Malto:Fructose   Begründung
     ──────────────────────────────────────────────────────────────────
-    ≤ 60 g/h     Nur Maltodextrin (1:0)      SGLT1 noch nicht saturiert,
+    < 60 g/h     Nur Maltodextrin (1:0)      SGLT1 noch nicht saturiert,
                                               Fructose bringt keinen Vorteil
-    60–80 g/h    2:1 (klassisches Verhältnis) SGLT1 saturiert, GLUT5 sinnvoll
-    80–100 g/h   5:4 (≈1:0,8)                Optimiert für max. Darmaufnahme
-    > 100 g/h    1:1                          Beide Transporter voll ausgelastet,
-                                              maximale Absorption
+    60–90 g/h    2:1                          Klassischer Standard;
+                                              bei 90 g/h: 60 g Glukose
+                                              + 30 g Fruktose → SGLT1
+                                              voll ausgelastet, GLUT5
+                                              moderat genutzt
+    > 90 g/h     5:4 (≈1:0,8)                Neuere Forschung (Fuchs 2019,
+                                              Viribay 2020); optimal bei
+                                              ~120 g/h: 67 g Glukose
+                                              + 53 g Fruktose → beide
+                                              Transporter maximal genutzt
 
-Praxis-Hinweis: Bei ≤60 g/h ist teures Fructose-Pulver unnötig.
-Ab 80 g/h beginnt der zweite Transporter (GLUT5) entscheidend zu werden.
+Hinweis – warum kein 1:1?
+    Frühere Versionen empfahlen für > 100 g/h ein 1:1-Verhältnis.
+    Die aktuelle Literatur (O'Brien & Rowlands 2011, Fuchs et al. 2019)
+    stützt das nicht klar – das 5:4-Verhältnis bleibt auch bei sehr
+    hoher Zufuhr (≥ 120 g/h) die belegtere Empfehlung.
+
+Praxis-Hinweis:
+    Bei < 60 g/h ist teures Fructose-Pulver unnötig.
+    Ab 90 g/h sollte auf 5:4 gewechselt werden, um die Darmaufnahme
+    in Richtung Maximum zu pushen.
+
+Wichtige Einschränkung (sportbrennstoff.com Magazin):
+    Bei Belastungen unter 80 % VO2max bringt eine Zufuhr über 2:1
+    hinaus keinen messbaren Vorteil und kann zu Magen-Darm-Problemen
+    führen. Die 5:4-Empfehlung gilt primär für sehr lange, intensive
+    Belastungen mit echtem Bedarf > 90 g/h.
 
 
 2b) Rezeptformel pro Softflask
@@ -1050,7 +1070,13 @@ Damit die Verzahnung der erweiterten Modelle klar wird, hier ein Überblick
 Quellen:
   - Coggan A. (2003): Normalized Power – originale Beschreibung
   - Jeukendrup A. (2014): A Step Towards Personalized Sports Nutrition,
-    Sports Med – Progressive Carb-Strategie
+    Sports Med – Progressive Carb-Strategie, Glucose:Fructose-Verhältnisse
+  - Fuchs C. J. et al. (2019), Nutrients: Sucrose- vs. Glucose-Fructose-
+    Ingestion – Aufnahmeraten und Oxidation
+  - Viribay A. et al. (2020), Nutrients: Effects of 120g/h Carbohydrate
+    Intake on Endurance Performance
+  - O'Brien W. J. & Rowlands D. S. (2011), Am J Physiol: Fructose-
+    Maltodextrin-Ratio bei Ultra-Ausdauer
   - Jeukendrup A. & Gleeson M. (3. Auflage): Sport Nutrition – Glykogen-
     physiologie während Belastung
   - Vøllestad N. K. & Blom P. C. (1985), Acta Physiol Scand: Glykogen-
