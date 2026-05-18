@@ -623,11 +623,26 @@ def berechne_koffein(profil, dauer_h):
         total_target_mg = max_efsa_mg
         cap_grund = "EFSA-Tagesgrenze (400 mg)"
 
-    # In Kapseln umrechnen (immer min. 1 Cap)
+    # In Kapseln umrechnen — Sicherheitsgrenzen dürfen durch Rundung NICHT
+    # verletzt werden. Erst kaufmännisch runden, dann bei Überschreitung
+    # auf floor zurückgehen.
     total_caps = max(1, round(total_target_mg / mg_pro_cap))
     actual_mg = total_caps * mg_pro_cap
+    safety_limit_mg = min(max_acute_mg, max_efsa_mg)
+    if actual_mg > safety_limit_mg and total_caps > 1:
+        total_caps = max(1, math.floor(safety_limit_mg / mg_pro_cap))
+        actual_mg = total_caps * mg_pro_cap
+        if cap_grund is None:
+            cap_grund = (f"EFSA-Tagesgrenze (400 mg)"
+                         if max_efsa_mg <= max_acute_mg
+                         else f"6 mg/kg Sicherheitsobergrenze ({max_acute_mg:.0f} mg)")
 
-    # Timing: Initial-Dosis + verteilte Erhaltungsdosen
+    # Sonderfall: einzelne Kapsel ist bereits > 200 mg → über EFSA-Akutgrenze
+    if mg_pro_cap > 200 and cap_grund is None:
+        cap_grund = (f"Kapsel-Groesse {mg_pro_cap} mg uebersteigt EFSA-Einzeldosis "
+                     "(200 mg) – ggf. teilen oder kleinere Kapseln verwenden.")
+
+    # ── Verteilung: Initial-Dosis + Erhaltungsdosen ──
     # Wenn die Gesamtdosis gedeckelt wurde, Initial proportional reduzieren,
     # damit lange Events nicht front-loaded werden.
     roh_total_mg = initial_mg_target + n_maintenance * maintenance_mg_per_dose
@@ -637,25 +652,50 @@ def berechne_koffein(profil, dauer_h):
     else:
         initial_mg_planned = initial_mg_target
 
-    initial_caps_target = max(1, round(initial_mg_planned / mg_pro_cap))
-    initial_caps = min(initial_caps_target, total_caps)
+    # Initial-Caps absichern: max. 200 mg pro Einzeldosis (EFSA-Empfehlung
+    # für eine einzelne Koffein-Aufnahme bei gesunden Erwachsenen).
+    initial_caps_natural = max(1, round(initial_mg_planned / mg_pro_cap))
+    max_single_dose_caps = max(1, math.floor(200 / mg_pro_cap))
+    initial_caps = min(initial_caps_natural, max_single_dose_caps, total_caps)
     remaining_caps = total_caps - initial_caps
 
-    timings = [{"zeit_h": 0.0, "caps": initial_caps,
-                "label": f"Start (~30 min vor Belastung): {initial_caps} Cap" +
-                         ("s" if initial_caps != 1 else "")}]
+    # ── Timings: pro Maintenance-Slot 1 oder mehr Caps bündeln ──
+    timings = [{
+        "zeit_h": 0.0,
+        "caps": initial_caps,
+        "label": f"Start (~30 min vor Belastung): {initial_caps} Cap"
+                 + ("s" if initial_caps != 1 else ""),
+    }]
 
-    if remaining_caps > 0 and dauer_h > 2:
-        # Verteile gleichmäßig zwischen Stunde 2 und (dauer - 0,5)
-        end_dose_at = max(2.0, dauer_h - 0.5)
-        if remaining_caps == 1:
-            t = round((2.0 + end_dose_at) / 2.0, 1)
-            timings.append({"zeit_h": t, "caps": 1, "label": f"h{t:.1f}: 1 Cap"})
+    if remaining_caps > 0:
+        if n_maintenance == 0 or dauer_h <= 2:
+            # Keine Erhaltungsslots vorhanden → restliche Caps an den Anfang anhängen
+            timings[0]["caps"] += remaining_caps
+            timings[0]["label"] = (
+                f"Start (~30 min vor Belastung): {timings[0]['caps']} Cap"
+                + ("s" if timings[0]['caps'] != 1 else "")
+            )
         else:
-            for i in range(remaining_caps):
-                t = 2.0 + (end_dose_at - 2.0) * i / max(1, remaining_caps - 1)
-                t = round(t, 1)
-                timings.append({"zeit_h": t, "caps": 1, "label": f"h{t:.1f}: 1 Cap"})
+            # remaining_caps gleichmäßig auf n_maintenance Slots verteilen
+            base_per_slot = remaining_caps // n_maintenance
+            extra = remaining_caps % n_maintenance
+            end_dose_at = max(2.0, dauer_h - 0.5)
+            for i in range(n_maintenance):
+                if n_maintenance == 1:
+                    t = round((2.0 + end_dose_at) / 2.0, 1)
+                else:
+                    t = 2.0 + (end_dose_at - 2.0) * i / (n_maintenance - 1)
+                    t = round(t, 1)
+                # Erste 'extra' Slots bekommen einen Cap mehr (Front-Load)
+                caps_this_slot = base_per_slot + (1 if i < extra else 0)
+                if caps_this_slot > 0:
+                    label = f"h{t:.1f}: {caps_this_slot} Cap" + (
+                        "s" if caps_this_slot != 1 else "")
+                    timings.append({
+                        "zeit_h": t,
+                        "caps": caps_this_slot,
+                        "label": label,
+                    })
 
     plan_str = " | ".join(t["label"] for t in timings)
 
@@ -1161,475 +1201,1252 @@ def schaetze_dauer(distanz_km, hoehenmeter, zone="Z2"):
     return round(distanz_km / v + (hoehenmeter / 100) * (6 / 60), 1)
 
 def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None,
-                       konstant_g_h=None):
+                       export_context=None):
+    """
+    Erstellt einen umfassenden Plan-Export als formatierten Text.
+    Bildet alle Daten aus der App-Ansicht ab, inkl. Glykogen-Bilanz und
+    Cardiac Drift.
+    """
+    ctx = export_context or {}
+    profil = ctx.get("profil", {})
+    ist_indoor = ctx.get("ist_indoor", False)
+    ist_konstant = ctx.get("ist_konstant", False)
+    konstant_g_h = ctx.get("konstant_g_h")
+    bilanz = ctx.get("bilanz") or {}
+    drift_rate = ctx.get("drift_rate", 0.0)
+    start_voll_pct = ctx.get("start_voll_pct", 1.0)
+    zufuhr_skalar = ctx.get("zufuhr_skalar", 1.0)
+    gpx_data = ctx.get("gpx_data")
+
     sf_res = e.get("softflasks", {})
     wf = e.get("wasserflaschen", {})
     sonne_label = {"keine": "Bedeckt", "mittel": "Teils sonnig", "stark": "Vollsonne"}
-    ist_konstant_export = konstant_g_h is not None
+    zone_namen = {
+        "Z1": "Z1 (Erholung)", "Z2": "Z2 (Grundlage / Aerob)",
+        "Z3": "Z3 (Tempo / Sweetspot)", "Z4": "Z4 (Schwelle)",
+        "Z5": "Z5 (Maximalintensität)", "Mix": "Mix (gemischte Zonen)",
+    }
 
-    if ist_konstant_export:
-        carbs_zeile = (
-            f"Gesamt        : {e['carbs']['gesamt']} g  "
-            f"({konstant_g_h} g/h konstant via {e['carbs']['quelle']})"
-        )
-    else:
-        carbs_zeile = (
-            f"Gesamt        : {e['carbs']['gesamt']} g  "
-            f"(O {e['carbs']['pro_h_avg']} g/h progressiv via {e['carbs']['quelle']})"
-        )
+    WIDTH = 78
 
-    lines = [
-        "=" * 62,
-        "  CYCLING FUELING PLAN",
-        "=" * 62,
-        f"Profil : {e['profil_name']}",
-        f"Zone   : {e['zone']}  |  Dauer: {e['dauer_h']} h  |  Temp: {e['temp']} °C",
-        "",
-        "--- KOHLENHYDRATE ---",
-        carbs_zeile,
-        f"Basis         : {e['carbs']['basis']} g",
-        f"HM-Bonus      : {e['carbs']['hm_bonus']} g",
-        f"Aus Gels      : {e['carbs']['aus_gels']} g",
-        f"Aus Riegeln   : {e['carbs']['aus_riegeln']} g",
-    ]
-    if sf_res.get("ratio_info"):
-        ri = sf_res["ratio_info"]
-        lines.append(f"Glukose:Frukt. : {ri[2]}")
-    # Stundenplan im TXT: progressiv oder konstant
-    prog_txt = e["carbs"].get("progressiv", [])
-    if ist_konstant_export and prog_txt and len(prog_txt) > 1:
-        # Konstante Strategie: einfache Zeile statt Stundenplan
-        gesamt_konstant = round(konstant_g_h * e["dauer_h"])
-        lines.append("")
-        lines.append(f"  Strategie     : Konstant {konstant_g_h} g/h jede Stunde")
-        lines.append(f"  Gesamt        : {gesamt_konstant} g")
-    elif prog_txt and len(prog_txt) > 1:
-        lines.append("")
-        lines.append("  Progressiver Zeitplan (Stunde -> g/h -> Menge):")
-        for s in prog_txt:
-            label = (f"  {s['start_min']:>3}-{s['end_min']:>3} min"
-                     if s["dauer_min"] < 60 else f"  Stunde {s['stunde']:<2}      ")
-            lines.append(f"{label}  {s['carbs_g_h']:>3} g/h  ->  {s['carbs_g']:>3} g")
-    lines.append("")
+    def hline(char="─"):
+        return char * WIDTH
 
+    def section_head(title, emoji=""):
+        bar = "═" * WIDTH
+        prefix = f"  {emoji} " if emoji else "  "
+        return ["", bar, f"{prefix}{title}", bar]
+
+    def sub_head(title):
+        return [f"\n{title}", hline()]
+
+    def kv(label, value, width=20):
+        return f"  {label:<{width}}: {value}"
+
+    def bullet(text, indent=2):
+        return f"{' ' * indent}• {text}"
+
+    lines = []
+
+    # ════════════════════════════════════════════════════════════════════
+    # KOPF / TITELBLOCK
+    # ════════════════════════════════════════════════════════════════════
     lines += [
-        "--- WASSER ---",
-        f"Gesamt        : {e['wasser']['gesamt']} ml  ({e['wasser']['pro_h']} ml/h)",
-        f"Aus Gels      : {e['wasser']['aus_gels']} ml",
-        f"Aus Flaschen  : {e['wasser']['zusaetzlich']} ml",
+        "█" * WIDTH,
+        "█" + " " * (WIDTH - 2) + "█",
+        "█" + "🚴  CYCLING FUELING PLAN  🚴".center(WIDTH - 2) + "█",
+        "█" + " " * (WIDTH - 2) + "█",
+        "█" * WIDTH,
+        "",
     ]
-    if wf:
-        lines.append(f"Auffüllungen  : {wf.get('auffuellungen', 0)}x  (~{wf.get('refill_ml', 0)} ml/Mal)")
-    lines.append("")
 
-    lines.append("--- SOFTFLASKS ---")
-    sf_flaschen = sf_res.get("flaschen", [])
-    if sf_flaschen:
-        for f in sf_flaschen:
-            r = f.get("rezept", {})
-            lines.append(f"  {f['anzahl']}x {f['name']} ({f['volumen_ml']} ml):")
-            lines.append(
-                f"    Carbs {f['carbs_pro_flask']} g  |  Malto {r.get('maltodextrin', 0)} g  |  "
-                f"Fructose {r.get('fructose', 0)} g  |  Salz {r.get('salz', 0)} g  |  "
-                f"Wasser {r.get('wasser', 0)} ml"
-            )
-    else:
-        r0 = sf_res.get("rezept", {})
+    # ── Übersicht ──
+    lines += sub_head("ℹ️  ÜBERSICHT")
+    lines += [
+        kv("Profil", e.get("profil_name", "—")),
+        kv("Erstellt am", datetime.now().strftime("%d.%m.%Y, %H:%M Uhr")),
+        kv("Trainingsmodus", "Indoor (Rolle / Heimtrainer)" if ist_indoor
+                              else "Outdoor (Straße / Gelände)"),
+        kv("Dauer", f"{e['dauer_h']} h"),
+    ]
+    if not ist_indoor:
+        if e.get("distanz_km"):
+            lines.append(kv("Distanz", f"{e['distanz_km']:.1f} km"))
+        if e.get("hoehenmeter"):
+            lines.append(kv("Höhenmeter", f"{e['hoehenmeter']:.0f} m"))
+    if profil.get("koerpergewicht_kg"):
+        lines.append(kv("Körpergewicht", f"{profil['koerpergewicht_kg']} kg"))
+
+    # ── Trainingsintensität ──
+    lines += sub_head("⚡ TRAININGSINTENSITÄT")
+    if e.get("watt") and e.get("ftp"):
+        pct_ftp = round(e["watt"] / e["ftp"] * 100, 1)
+        watt_label = ("Leistung (Durchschnitt)" if ist_indoor
+                      else "Leistung (Normalized Power)")
         lines += [
-            f"Anzahl        : {sf_res.get('anzahl', 0)}",
-            f"Carbs/Flask   : {sf_res.get('carbs_pro_flask', 0)} g",
-            f"Rezept        : Malto {r0.get('maltodextrin', 0)} g  |  Fructose {r0.get('fructose', 0)} g  |  "
-            f"Salz {r0.get('salz', 0)} g  |  Wasser {r0.get('wasser', 0)} ml",
+            kv(watt_label, f"{e['watt']:.0f} W"),
+            kv("FTP", f"{e['ftp']:.0f} W   →  {pct_ftp}% FTP"),
         ]
-    lines.append("")
-
-    if e.get("riegel"):
-        lines.append("--- RIEGEL ---")
-        for r in e["riegel"]:
-            lines.append(
-                f"  {r['anzahl']}x  {r['name']}"
-                f"  (Carbs: {r['carbs_gesamt']} g, Zucker: {r['zucker_gesamt']} g)"
-            )
-        lines.append("")
-
-    el = e["elektrolyte"]
-    lines += [
-        "--- ELEKTROLYTE ---",
-        f"Produkt       : {el['name']}",
-        f"Menge         : {el['portion_g']} g x {el['fuellungen']}  =  {el['gesamt_g']} g",
-        "",
-        "--- KOFFEIN ---",
-    ]
-    _ko = e["koffein"]
-    if _ko["caps"]:
-        lines.append(f"Kapseln       : {_ko['caps']} Stk.  "
-                     f"({_ko.get('gesamt_mg', 0)} mg gesamt, "
-                     f"{_ko.get('mg_pro_kg', 0)} mg/kg)")
-        lines.append("Plan          :")
-        for t in _ko.get("timings", []):
-            lines.append(f"  - {t['label']}")
-        if _ko.get("cap_grund"):
-            lines.append(f"Hinweis       : Dosis gedeckelt – {_ko['cap_grund']}")
-    else:
-        lines.append(f"Plan          : {_ko['plan']}")
-    lines.append("")
-
-    mix_iv = e.get("mix_intervalle")
-    if mix_iv:
-        lines.append("--- TRAININGS-INTERVALLE (MIX) ---")
-        total_min = sum(iv.get("dauer_min", 0) for iv in mix_iv)
-        for iv in mix_iv:
-            anteil = f"{round(iv['dauer_min'] / total_min * 100)}%" if total_min else ""
-            extra = ""
-            if iv.get("watt"):
-                extra += f"  |  {iv['watt']} W"
-            if iv.get("hf"):
-                extra += f"  |  {iv['hf']} bpm"
-            lines.append(
-                f"  {iv.get('zone', ''):4s}: {iv.get('dauer_min', 0):3d} min ({anteil:>4s})"
-                f"  Carbs/h: {CARBS_PRO_STUNDE.get(iv.get('zone', 'Z2'), 60)} g/h{extra}"
-            )
-        lines.append("")
-
-    if wetter_info:
+    elif e.get("hf") and e.get("hr_max"):
+        pct_hrmax = round(e["hf"] / e["hr_max"] * 100, 1)
         lines += [
-            "--- WETTER ---",
-            f"Temperatur    : {wetter_info['avg_temp']} °C  (min {wetter_info['min_temp']} / max {wetter_info['max_temp']})",
-            f"Sonne         : {sonne_label.get(wetter_info.get('sonne', ''), wetter_info.get('sonne', '-'))}",
-            f"Wind          : {wetter_info['avg_wind']} km/h",
-            f"Regen         : {wetter_info['sum_regen']} mm",
+            kv("Herzfrequenz", f"{e['hf']:.0f} bpm"),
+            kv("HRmax", f"{e['hr_max']} bpm   →  {pct_hrmax}% HRmax"),
+        ]
+    lines += [
+        kv("Zone", zone_namen.get(e["zone"], e["zone"])),
+        kv("Quelle", e["carbs"]["quelle"]),
+    ]
+
+    # ── Wetter (nur Outdoor) ──
+    if wetter_info and not ist_indoor:
+        lines += sub_head("🌡  WETTERBEDINGUNGEN")
+        lines += [
+            kv("Temperatur Ø", f"{wetter_info['avg_temp']}°C  "
+                                f"(min {wetter_info['min_temp']} / max {wetter_info['max_temp']})"),
+            kv("Sonneneinstrahlung",
+               sonne_label.get(wetter_info.get("sonne", ""),
+                               wetter_info.get("sonne", "-"))),
+            kv("Wind Ø", f"{wetter_info['avg_wind']} km/h"),
+            kv("Regen", f"{wetter_info['sum_regen']} mm"),
         ]
         if wetter_punkte and len(wetter_punkte) > 1:
-            lines.append("  Verlauf entlang der Route:")
-            lines.append(f"  {'km':>5}  {'Uhrzeit':>8}  {'Lat':>9}  {'Lon':>9}  {'Temp':>6}  {'Regen':>7}")
+            lines.append("")
+            lines.append("  Wetterverlauf entlang der Route:")
+            lines.append(f"    {'km':>4}  {'Uhrzeit':>7}  {'Lat':>9}  {'Lon':>9}  "
+                         f"{'Temp':>6}  {'Regen':>7}")
+            lines.append(f"    {'─' * 4}  {'─' * 7}  {'─' * 9}  {'─' * 9}  "
+                         f"{'─' * 6}  {'─' * 7}")
             for pt in wetter_punkte:
                 lines.append(
-                    f"  {pt.get('km', '?'):>5}  {pt.get('uhrzeit', ''):>8}  "
-                    f"{pt.get('lat', ''):>9.4f}  {pt.get('lon', ''):>9.4f}  "
-                    f"{pt.get('temp_avg', '?'):>5} °C  {pt.get('regen_mm', '?'):>5} mm"
+                    f"    {pt.get('km', '?'):>4}  {pt.get('uhrzeit', ''):>7}  "
+                    f"{pt.get('lat', 0):>9.4f}  {pt.get('lon', 0):>9.4f}  "
+                    f"{pt.get('temp_avg', '?'):>4}°C  {pt.get('regen_mm', '?'):>5} mm"
                 )
-        lines.append("")
+    elif ist_indoor:
+        lines += sub_head("🌡  TRAININGSUMGEBUNG")
+        lines.append(kv("Raumtemperatur", f"{e['temp']}°C"))
 
+    # ════════════════════════════════════════════════════════════════════
+    # KOHLENHYDRATE
+    # ════════════════════════════════════════════════════════════════════
+    lines += section_head("KOHLENHYDRATE", "🍬")
+
+    strategie_label = (
+        f"➡️ Konstant ({konstant_g_h} g/h jede Stunde)"
+        if (ist_konstant and konstant_g_h is not None)
+        else "📈 Progressiv (steigt über die Zeit)"
+    )
+
+    lines += sub_head("GESAMTBEDARF")
+    lines += [
+        kv("Strategie", strategie_label),
+        kv("Gesamt-Carbs", f"{e['carbs']['gesamt']} g"),
+        kv("Pro Stunde Ø",
+           f"{konstant_g_h} g/h" if (ist_konstant and konstant_g_h is not None)
+           else f"{e['carbs']['pro_h_avg']} g/h"),
+        kv("Basis-Berechnung", f"{e['carbs']['basis']} g"),
+    ]
+    if e["carbs"].get("hm_bonus"):
+        lines.append(kv("Höhenmeter-Bonus", f"+{e['carbs']['hm_bonus']} g"))
+
+    lines += sub_head("VERTEILUNG GELS & RIEGEL")
+    gesamt = max(1, e["carbs"]["gesamt"])
+    gels_pct = round(e["carbs"]["aus_gels"] / gesamt * 100)
+    rieg_pct = round(e["carbs"]["aus_riegeln"] / gesamt * 100)
+    lines += [
+        kv("Aus Gels", f"{e['carbs']['aus_gels']} g  ({gels_pct}%)"),
+        kv("Aus Riegeln", f"{e['carbs']['aus_riegeln']} g  ({rieg_pct}%)"),
+    ]
+    if sf_res.get("ratio_info"):
+        lines.append(kv("Glukose:Fructose", sf_res["ratio_info"][2]))
+
+    # Progressiver Stundenplan ODER Konstante Aufschlüsselung
+    prog_txt = e["carbs"].get("progressiv", [])
+    if ist_konstant and konstant_g_h is not None:
+        lines += sub_head("➡️ KONSTANTE ZUFUHR PRO STUNDE")
+        gesamt_k = round(konstant_g_h * e["dauer_h"])
+        lines.append(kv("Pro Stunde", f"{konstant_g_h} g"))
+        lines.append(kv("Dauer", f"{e['dauer_h']} h"))
+        lines.append(kv("Gesamt-Menge", f"{gesamt_k} g"))
+    elif prog_txt and len(prog_txt) > 1:
+        lines += sub_head("📈 PROGRESSIVER STUNDENPLAN")
+        max_rate = max(s["carbs_g_h"] for s in prog_txt) or 1
+        lines.append(f"  {'Stunde':<12} {'g/h':>7} {'Menge':>8}   {'Verlauf'}")
+        lines.append(f"  {'─' * 12} {'─' * 7} {'─' * 8}   {'─' * 20}")
+        for s in prog_txt:
+            stunde = (f"{s['start_min']}–{s['end_min']} min"
+                      if s["dauer_min"] < 60 else f"Stunde {s['stunde']}")
+            pct = s["carbs_g_h"] / max_rate
+            bar = "█" * int(pct * 14) + "░" * (14 - int(pct * 14))
+            lines.append(f"  {stunde:<12} {s['carbs_g_h']:>5} g {s['carbs_g']:>6} g   {bar}")
+        gesamt_p = sum(s["carbs_g"] for s in prog_txt)
+        lines.append(f"  {'─' * 12} {'─' * 7} {'─' * 8}")
+        lines.append(f"  {'Summe':<12} {'':>7} {gesamt_p:>6} g  "
+                     f"(Ø {e['carbs']['pro_h_avg']} g/h)")
+
+    # ════════════════════════════════════════════════════════════════════
+    # WASSER & ELEKTROLYTE
+    # ════════════════════════════════════════════════════════════════════
+    lines += section_head("WASSER & ELEKTROLYTE", "💧")
+
+    lines += sub_head("WASSERMENGE")
+    lines += [
+        kv("Gesamt", f"{e['wasser']['gesamt']} ml  ({e['wasser']['pro_h']} ml/h)"),
+        kv("Aus Gels", f"{e['wasser']['aus_gels']} ml"),
+        kv("Aus Trinkflaschen", f"{e['wasser']['zusaetzlich']} ml"),
+    ]
+    if profil.get("schweissrate", {}).get("preset"):
+        preset = profil["schweissrate"]["preset"]
+        preset_label = {"wenig": "Wenig-Schwitzer",
+                        "mittel": "Mittel-Schwitzer",
+                        "viel": "Viel-Schwitzer",
+                        "kalibriert": "Kalibriert (eigene Werte)"}.get(preset, preset)
+        lines.append(kv("Schweißtyp", preset_label))
+    if wf and wf.get("auffuellungen", 0) > 0:
+        lines.append(kv("Auffüllungen",
+                        f"{wf['auffuellungen']}×  (Ø {wf.get('refill_ml', 0)} ml/Mal)"))
+
+    lines += sub_head("ELEKTROLYTE")
+    el = e["elektrolyte"]
+    lines += [
+        kv("Produkt", el["name"]),
+        kv("Portion", f"{el['portion_g']} g"),
+        kv("Anzahl Portionen", f"{el['fuellungen']}×"),
+        kv("Gesamt", f"{el['gesamt_g']} g"),
+    ]
+    minerals = el.get("mineralien", {})
+    nicht_null = {m: v for m, v in minerals.items() if v}
+    if nicht_null:
+        lines.append("")
+        lines.append("  Mineralstoff-Gesamtmenge:")
+        for m_name in ["natrium", "kalium", "chlorid", "calcium", "magnesium"]:
+            if minerals.get(m_name):
+                lines.append(f"    • {m_name.capitalize():<10}: {minerals[m_name]} mg")
+
+    # ════════════════════════════════════════════════════════════════════
+    # GLYKOGEN-SPEICHERBILANZ
+    # ════════════════════════════════════════════════════════════════════
+    if bilanz:
+        lines += section_head("GLYKOGEN-SPEICHERBILANZ", "🧬")
+
+        ts_label = {"untrained": "Untrainiert",
+                    "trained": "Trainiert",
+                    "trained_loaded": "Trainiert + Carbo-Loading",
+                    "elite_loaded": "Elite + Loading"}.get(
+                        bilanz.get("trainings_status", ""),
+                        bilanz.get("trainings_status", "—"))
+        lines += sub_head("SPEICHERSTATUS")
+        lines += [
+            kv("Körpergewicht", f"{bilanz['koerpergewicht_kg']} kg"),
+            kv("Trainingsstatus", ts_label),
+            kv("Glykogenkapazität", f"{bilanz['g_pro_kg']} g/kg"),
+            kv("Speicher voll", f"{bilanz['speicher_voll_g']} g"),
+            kv("Start-Füllstand",
+               f"{int(start_voll_pct * 100)}%  ({bilanz['speicher_start_g']} g)"),
+            kv("Verbrauch (echt)",
+               f"{bilanz['verbrauch_eff_pro_h']:.0f} g/h "
+               f"{'(steigt mit Drift)' if drift_rate > 0 else '(konstant)'}"),
+            kv("Speicher am Ende",
+               f"{bilanz['speicher_end_pct']:.0f}%  ({bilanz['speicher_end_g']} g)"),
+        ]
+
+        if drift_rate > 0:
+            lines += sub_head("🫀 CARDIAC DRIFT")
+            verbrauch_basis = bilanz["verbrauch_eff_pro_h"]
+            verbrauch_end = verbrauch_basis * (1 + drift_rate * (e["dauer_h"] - 1))
+            lines += [
+                kv("Drift-Rate", f"+{drift_rate*100:.1f}% pro Stunde"),
+                kv("Verbrauch Stunde 1", f"{verbrauch_basis:.0f} g/h"),
+                kv(f"Verbrauch Stunde {int(e['dauer_h'])}",
+                   f"{verbrauch_end:.0f} g/h"),
+            ]
+
+        # Stündlicher Verlauf
+        stunden = bilanz.get("stunden", [])
+        if stunden:
+            lines += sub_head("STÜNDLICHER VERLAUF")
+            if drift_rate > 0:
+                lines.append(f"  {'Stunde':>7}  {'Verbr.':>8}  {'Zufuhr':>8}  "
+                             f"{'Aus Speich.':>12}  {'Speicher':>9}  {'Rest %':>6}")
+                lines.append(f"  {'─' * 7}  {'─' * 8}  {'─' * 8}  "
+                             f"{'─' * 12}  {'─' * 9}  {'─' * 6}")
+                for s in stunden:
+                    aus_sp = ("✓ gedeckt" if s["gedeckt"]
+                              else f"+{s['defizit_g']:.0f} g")
+                    lines.append(
+                        f"  {s['stunde_bis']:>5.1f} h  "
+                        f"{s['verbrauch_g']:>6.0f} g  "
+                        f"{s['zufuhr_g']:>6.0f} g  "
+                        f"{aus_sp:>12}  "
+                        f"{s['speicher_rest_g']:>7} g  "
+                        f"{s['speicher_rest_pct']:>5.0f}%"
+                    )
+            else:
+                lines.append(f"  {'Stunde':>7}  {'Verbr.':>8}  {'Zufuhr':>8}  "
+                             f"{'Aus Speich.':>12}  {'Speicher':>9}  {'Rest %':>6}")
+                lines.append(f"  {'─' * 7}  {'─' * 8}  {'─' * 8}  "
+                             f"{'─' * 12}  {'─' * 9}  {'─' * 6}")
+                for s in stunden:
+                    aus_sp = ("✓ gedeckt" if s["gedeckt"]
+                              else f"+{s['defizit_g']:.0f} g")
+                    lines.append(
+                        f"  {s['stunde_bis']:>5.1f} h  "
+                        f"{s['verbrauch_g']:>6.0f} g  "
+                        f"{s['zufuhr_g']:>6.0f} g  "
+                        f"{aus_sp:>12}  "
+                        f"{s['speicher_rest_g']:>7} g  "
+                        f"{s['speicher_rest_pct']:>5.0f}%"
+                    )
+
+        # Empfehlungen
+        empfehlungen = bilanz.get("empfehlungen", [])
+        if empfehlungen:
+            lines += sub_head("EMPFEHLUNGEN")
+            for emp in empfehlungen:
+                clean = emp.replace("**", "")
+                lines.append(f"  • {clean}")
+
+    # ════════════════════════════════════════════════════════════════════
+    # SOFTFLASKS
+    # ════════════════════════════════════════════════════════════════════
+    sf_flaschen = sf_res.get("flaschen", [])
+    if sf_flaschen or sf_res.get("anzahl", 0) > 0:
+        lines += section_head("SOFTFLASKS (selbstgemischt)", "🍯")
+        if sf_flaschen:
+            for f in sf_flaschen:
+                r = f.get("rezept", {})
+                lines.append(f"\n  {f['anzahl']}× {f['name']}  ({f['volumen_ml']} ml)")
+                lines.append("  " + "─" * (WIDTH - 4))
+                lines += [
+                    kv("Carbs/Flask", f"{f['carbs_pro_flask']} g", width=18),
+                    kv("Maltodextrin", f"{r.get('maltodextrin', 0)} g", width=18),
+                    kv("Fructose", f"{r.get('fructose', 0)} g", width=18),
+                    kv("Salz", f"{r.get('salz', 0)} g", width=18),
+                    kv("Wasser", f"{r.get('wasser', 0)} ml", width=18),
+                ]
+        else:
+            r0 = sf_res.get("rezept", {})
+            lines += [
+                kv("Anzahl", sf_res.get("anzahl", 0)),
+                kv("Carbs/Flask", f"{sf_res.get('carbs_pro_flask', 0)} g"),
+                kv("Maltodextrin", f"{r0.get('maltodextrin', 0)} g"),
+                kv("Fructose", f"{r0.get('fructose', 0)} g"),
+                kv("Salz", f"{r0.get('salz', 0)} g"),
+                kv("Wasser", f"{r0.get('wasser', 0)} ml"),
+            ]
+
+    # ════════════════════════════════════════════════════════════════════
+    # RIEGEL
+    # ════════════════════════════════════════════════════════════════════
+    if e.get("riegel"):
+        lines += section_head("RIEGEL & SNACKS", "🍫")
+        gesamt_riegel = 0
+        gesamt_riegel_carbs = 0
+        for r in e["riegel"]:
+            lines.append(f"\n  {r['anzahl']}× {r['name']}")
+            lines.append(f"     Carbs: {r['carbs_gesamt']} g "
+                         f"({r['anzahl']}× {r['carbs_g_pro_stueck']} g)  "
+                         f"|  Zucker: {r['zucker_gesamt']} g")
+            gesamt_riegel += r["anzahl"]
+            gesamt_riegel_carbs += r["carbs_gesamt"]
+        lines.append("")
+        lines.append(f"  GESAMT: {gesamt_riegel} Riegel  |  {gesamt_riegel_carbs} g Carbs")
+
+    # ════════════════════════════════════════════════════════════════════
+    # KOFFEIN
+    # ════════════════════════════════════════════════════════════════════
+    _ko = e["koffein"]
+    if _ko.get("caps", 0) > 0:
+        lines += section_head("KOFFEIN-PLAN", "☕")
+        lines += [
+            kv("Kapseln gesamt", f"{_ko['caps']} Stk."),
+            kv("Gesamt-Koffein", f"{_ko.get('gesamt_mg', 0)} mg"),
+            kv("Pro kg KG", f"{_ko.get('mg_pro_kg', 0):.2f} mg/kg "
+                            "(Ziel: 3–6 mg/kg laut ISSN)"),
+        ]
+        if _ko.get("cap_grund"):
+            lines.append(kv("Sicherheits-Cap", _ko["cap_grund"]))
+        lines.append("")
+        lines.append("  Einnahme-Plan:")
+        for t in _ko.get("timings", []):
+            lines.append(f"    • {t['label']}")
+
+    # ════════════════════════════════════════════════════════════════════
+    # MIX-INTERVALLE
+    # ════════════════════════════════════════════════════════════════════
+    mix_iv = e.get("mix_intervalle")
+    if mix_iv:
+        lines += section_head("TRAININGS-INTERVALLE (MIX)", "🔀")
+        total_min = sum(iv.get("dauer_min", 0) for iv in mix_iv)
+        lines.append(f"  {'Zone':<5}  {'Dauer':>7}  {'Anteil':>7}  "
+                     f"{'Carbs/h':>8}  {'Watt':>6}  {'HF':>6}")
+        lines.append(f"  {'─' * 5}  {'─' * 7}  {'─' * 7}  "
+                     f"{'─' * 8}  {'─' * 6}  {'─' * 6}")
+        for iv in mix_iv:
+            anteil = (f"{round(iv['dauer_min'] / total_min * 100)}%"
+                      if total_min else "")
+            watt = f"{iv['watt']} W" if iv.get("watt") else "—"
+            hf = f"{iv['hf']} bpm" if iv.get("hf") else "—"
+            lines.append(
+                f"  {iv.get('zone', ''):<5}  "
+                f"{iv.get('dauer_min', 0):>4} min  "
+                f"{anteil:>7}  "
+                f"{CARBS_PRO_STUNDE.get(iv.get('zone', 'Z2'), 60):>5} g/h  "
+                f"{watt:>6}  {hf:>6}"
+            )
+        lines.append(f"\n  Gesamtdauer: {total_min} min  "
+                     f"|  Gewichteter Schnitt: {e['carbs']['pro_h']} g/h")
+
+    # ════════════════════════════════════════════════════════════════════
+    # GPX-ROUTE
+    # ════════════════════════════════════════════════════════════════════
+    if gpx_data:
+        lines += section_head("GPX-ROUTE", "🗺")
+        lines += [
+            kv("Streckenname", gpx_data.get("name", "—")),
+            kv("Distanz", f"{gpx_data.get('distanz_km', 0):.1f} km"),
+            kv("Höhenmeter ↑", f"{int(gpx_data.get('hoehenmeter_auf', 0))} m"),
+            kv("Höhenmeter ↓", f"{int(gpx_data.get('hoehenmeter_ab', 0))} m"),
+            kv("Anzahl Trackpunkte", f"{len(gpx_data.get('points', []))}"),
+        ]
+
+    # ════════════════════════════════════════════════════════════════════
+    # RESUPPLY-STOPPS
+    # ════════════════════════════════════════════════════════════════════
     if resupply_stopps:
-        lines.append("--- RESUPPLY-STOPPS ---")
+        lines += section_head("RESUPPLY-STOPPS (Wasser & Carbs)", "📍")
         for i, stopp in enumerate(resupply_stopps):
             needs = []
             if stopp.get("braucht_wasser"): needs.append("Wasser")
             if stopp.get("braucht_carbs"):  needs.append("Carbs")
-            lines.append(f"Stopp {i + 1}  –  km {stopp.get('km', '?')}  [{' + '.join(needs)}]")
+            lines.append(f"\n  ┌─ STOPP {i + 1}  •  km {stopp.get('km', '?')}  "
+                         f"•  [{' + '.join(needs)}]")
             if stopp.get("lat"):
-                lines.append(f"  Position      : {stopp['lat']:.5f}° N,  {stopp['lon']:.5f}° O")
+                lines.append(f"  │  Position         : "
+                             f"{stopp['lat']:.5f}° N, {stopp['lon']:.5f}° E")
+                lines.append(f"  │  Google Maps      : "
+                             f"https://maps.google.com/?q={stopp['lat']:.5f},{stopp['lon']:.5f}")
             if stopp.get("braucht_wasser"):
-                lines.append(f"  Wasser        : ~{stopp.get('wasser_refill_ml', '?')} ml auffüllen")
+                lines.append(f"  │  Wasser auffüllen : "
+                             f"~{stopp.get('wasser_refill_ml', '?')} ml")
             if stopp.get("braucht_carbs"):
                 einkauf = stopp.get("carbs_einkauf_g", 0)
-                lines.append(f"  Carbs kaufen  : ~{einkauf} g")
+                lines.append(f"  │  Carbs kaufen     : ~{einkauf} g")
                 if einkauf:
                     lines.append(
-                        f"    z.B. {math.ceil(einkauf / 35)} Riegel (à 35 g)  oder  "
-                        f"{round(einkauf / 25)} Bananen  oder  "
-                        f"{round(einkauf / 0.85):.0f} g Gummibärchen"
+                        f"  │     z.B. {math.ceil(einkauf / 35)} Riegel (à 35 g)  "
+                        f"oder {round(einkauf / 25)} Bananen  "
+                        f"oder {round(einkauf / 0.85):.0f} g Gummibärchen"
                     )
             pois = stopp.get("poi_ergebnisse", [])
             if pois:
-                lines.append("  Einkaufsstationen:")
+                lines.append("  │  Einkaufsstationen:")
                 for rank, p in enumerate(pois[:3]):
                     adresse = (
-                        p.get("strasse", "") + (f", {p['ort']}" if p.get("ort") else "")
+                        p.get("strasse", "")
+                        + (f", {p['ort']}" if p.get("ort") else "")
                     ).strip(", ")
-                    marker = "  * " if rank == 0 else "    "
+                    marker = "⭐" if rank == 0 else "  "
                     lines.append(
-                        f"{marker}{p['name']} ({p['typ']})  –  km {p['route_km']}  –  {p['dist_m']} m zur Route"
+                        f"  │   {marker} {p['name']} ({p['typ']})  "
+                        f"– km {p['route_km']}  – {p['dist_m']} m zur Route"
                     )
                     if adresse:
-                        lines.append(f"       {adresse}")
-            lines.append("")
+                        lines.append(f"  │       {adresse}")
+            lines.append(f"  └{'─' * (WIDTH - 3)}")
 
+    # ════════════════════════════════════════════════════════════════════
+    # FOOTER
+    # ════════════════════════════════════════════════════════════════════
     lines += [
-        "=" * 62,
-        "  Ende des Plans",
-        "=" * 62,
         "",
-        "(c) 2024-2025 Felix Manasov. Alle Rechte vorbehalten.",
-        "Nutzung der App erlaubt. Kopieren/Weitergabe des Codes untersagt.",
-        "https://github.com/FeDaSy/fueling-planner",
+        "═" * WIDTH,
+        "",
+        "  © 2024–2026 Felix Manasov. Alle Rechte vorbehalten.",
+        "  Nutzung der App erlaubt. Kopieren/Weitergabe des Codes untersagt.",
+        "",
+        "  🔗 App:  https://fueling-planner.streamlit.app",
+        "  📚 Doku: https://github.com/FeDaSy/fueling-planner/blob/main/BERECHNUNGEN_UND_APIS.txt",
+        "  💬 Feedback: https://forms.gle/xrj1fAKduJtJYy5B7",
+        "",
+        "═" * WIDTH,
     ]
     return "\n".join(lines)
 
 
-def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None):
+def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=None,
+                      export_context=None):
+    """
+    Erstellt einen visuell ansprechenden PDF-Plan, der alle Daten der
+    App-Ansicht enthält (Carbs, Wasser, Glykogen-Bilanz, Cardiac Drift,
+    Softflasks, Riegel, Elektrolyte, Koffein, Mix-Intervalle, GPX, Wetter,
+    Resupply-Stopps).
+    """
     try:
         from fpdf import FPDF
         from fpdf.enums import XPos, YPos
     except ImportError:
         return b""
 
-    LM  = 10    # left margin mm
-    W   = 190   # usable width mm
-    LH  = 6.0   # standard line height
+    ctx = export_context or {}
+    profil = ctx.get("profil", {})
+    ist_indoor = ctx.get("ist_indoor", False)
+    ist_konstant = ctx.get("ist_konstant", False)
+    konstant_g_h = ctx.get("konstant_g_h")
+    bilanz = ctx.get("bilanz") or {}
+    drift_rate = ctx.get("drift_rate", 0.0)
+    start_voll_pct = ctx.get("start_voll_pct", 1.0)
+    gpx_data = ctx.get("gpx_data")
+
+    LM = 12         # left margin mm
+    W = 186         # usable width mm
+    LH = 5.5        # standard line height
+    LH_TIGHT = 4.8  # compact line height
+
+    # Color palette
+    CLR_PRIMARY = (45, 90, 160)          # dark blue
+    CLR_PRIMARY_LIGHT = (220, 232, 248)  # light blue background
+    CLR_ACCENT = (220, 100, 50)          # orange accent
+    CLR_TEXT = (40, 40, 40)              # near-black
+    CLR_MUTED = (110, 110, 110)          # gray
+    CLR_GREEN = (60, 150, 80)
+    CLR_AMBER = (220, 165, 50)
+    CLR_RED = (200, 70, 60)
+    CLR_TABLE_HEAD = (50, 75, 130)
+    CLR_TABLE_ALT = (245, 248, 252)
+    CLR_BORDER = (200, 210, 225)
 
     sf_res = e.get("softflasks", {})
-    wf     = e.get("wasserflaschen", {})
+    wf = e.get("wasserflaschen", {})
     sonne_label = {"keine": "Bedeckt", "mittel": "Teils sonnig", "stark": "Vollsonne"}
+    zone_namen = {
+        "Z1": "Z1 (Erholung)", "Z2": "Z2 (Grundlage / Aerob)",
+        "Z3": "Z3 (Tempo / Sweetspot)", "Z4": "Z4 (Schwelle)",
+        "Z5": "Z5 (Maximalintensitaet)", "Mix": "Mix (gemischte Zonen)",
+    }
 
     def _s(text):
+        """Latin-1 sanitization for fpdf2 (no emojis/unicode in core fonts)."""
         t = str(text)
-        for src, dst in [
-            ("–", "-"), ("—", "-"), ("'", "'"),
-            (""", '"'), (""", '"'), ("≤", "<="),
-            ("≥", ">="), ("→", "->"),
-        ]:
+        replacements = [
+            # Strip Markdown-Markup
+            ("**", ""), ("*_", ""), ("_*", ""),
+            # Typografische Zeichen
+            ("–", "-"), ("—", "-"),
+            ("'", "'"), ("'", "'"),
+            (""", '"'), (""", '"'),
+            ("≤", "<="), ("≥", ">="), ("→", "->"), ("←", "<-"),
+            ("·", "-"), ("•", "*"),
+            ("⭐", "*"), ("✓", "[OK]"), ("✅", "[OK]"), ("✗", "[X]"), ("❌", "[X]"),
+            ("█", "#"), ("░", "."),
+            ("≈", "~"), ("Ø", "O"),
+            ("…", "..."), ("´", "'"), ("`", "'"),
+            # Sektions-Emojis (entfernen)
+            ("🍬", ""), ("💧", ""), ("🧬", ""), ("🍯", ""), ("🍫", ""),
+            ("☕", ""), ("🌡", ""), ("⚡", ""), ("📍", ""), ("🚴", ""),
+            ("🫀", ""), ("📈", ""), ("➡️", ""), ("➡", ""), ("🔀", ""),
+            ("🗺", ""), ("🗺️", ""),
+            ("ℹ️", ""), ("ℹ", ""), ("⚠️", "[!]"), ("⚠", "[!]"),
+            ("📥", ""), ("📄", ""), ("📌", ""), ("📉", ""), ("📊", ""),
+            ("💡", "[Tipp]"), ("⛔", "[STOPP]"),
+            ("🟢", "[O]"), ("🟡", "[!]"), ("🟠", "[!]"), ("🔴", "[X]"),
+            # ZWJ + Variations-Selektor (für Emoji-Kombinationen)
+            ("‍", ""), ("️", ""),
+        ]
+        for src, dst in replacements:
             t = t.replace(src, dst)
+        # Mehrfache Leerzeichen am Zeilen-Anfang entfernen (wenn Emoji weggefallen ist)
         return t.encode("latin-1", errors="replace").decode("latin-1")
 
-    def nl(pdf_obj):
-        """Move to next line at left margin."""
-        pdf_obj.set_x(LM)
-        pdf_obj.ln(LH)
-
     pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=True, margin=18)
     pdf.set_margins(LM, LM, LM)
     pdf.add_page()
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
-    def section(title):
-        pdf.ln(3)
-        pdf.set_x(LM)
-        pdf.set_font("Helvetica", "B", 11)
-        pdf.set_fill_color(210, 225, 245)
-        pdf.cell(W, 7, _s(title),
-                 new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.ln(1)
+    # ── Helpers ──────────────────────────────────────────────────────────────
+    def reset_color():
+        pdf.set_text_color(*CLR_TEXT)
+        pdf.set_draw_color(*CLR_BORDER)
+        pdf.set_fill_color(255, 255, 255)
 
-    def kv(label, value):
-        """Two-column key-value row. Always starts at left margin."""
+    def section_main(title, subtitle=None):
+        """Big section header (used for top-level groups: Carbs, Wasser, …)."""
+        pdf.ln(4)
         pdf.set_x(LM)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(62, LH, _s(label + ":"),
-                 new_x=XPos.RIGHT, new_y=YPos.TOP)
+        pdf.set_fill_color(*CLR_PRIMARY)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(W, 9, _s(title), new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+        if subtitle:
+            pdf.set_x(LM)
+            pdf.set_fill_color(*CLR_PRIMARY_LIGHT)
+            pdf.set_text_color(*CLR_TEXT)
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.cell(W, 5, _s(subtitle), new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+        reset_color()
         pdf.set_font("Helvetica", "", 10)
-        # multi_cell must land back at left margin after finishing
-        pdf.multi_cell(W - 62, LH, _s(str(value)),
+        pdf.ln(2)
+
+    def subsection(title):
+        """Smaller subsection label inside a main section."""
+        pdf.ln(1)
+        pdf.set_x(LM)
+        pdf.set_text_color(*CLR_PRIMARY)
+        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.cell(W, 6, _s(title), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        # subtle underline
+        pdf.set_draw_color(*CLR_BORDER)
+        pdf.set_line_width(0.2)
+        pdf.line(LM, pdf.get_y(), LM + W, pdf.get_y())
+        pdf.ln(1)
+        reset_color()
+        pdf.set_font("Helvetica", "", 10)
+
+    def kv(label, value, label_w=55):
+        """Key-value row, label left-aligned bold, value to the right."""
+        pdf.set_x(LM)
+        pdf.set_font("Helvetica", "B", 9.5)
+        pdf.cell(label_w, LH, _s(label),
+                 new_x=XPos.RIGHT, new_y=YPos.TOP)
+        pdf.set_font("Helvetica", "", 9.5)
+        pdf.multi_cell(W - label_w, LH, _s(str(value)),
                        new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    def body(text, indent=0):
+    def body(text, indent=0, italic=False):
         pdf.set_x(LM + indent)
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font("Helvetica", "I" if italic else "", 9.5)
         pdf.multi_cell(W - indent, LH, _s(text),
                        new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    def note(text, indent=8):
+    def note(text, indent=4):
         pdf.set_x(LM + indent)
         pdf.set_font("Helvetica", "I", 8.5)
-        pdf.set_text_color(90, 90, 90)
-        pdf.multi_cell(W - indent, 4.5, _s(text),
+        pdf.set_text_color(*CLR_MUTED)
+        pdf.multi_cell(W - indent, 4.3, _s(text),
                        new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        pdf.set_text_color(0, 0, 0)
+        reset_color()
+        pdf.set_font("Helvetica", "", 10)
 
-    def table_row(vals, cws, font_style="", font_size=9, border=1):
+    def colored_pill(text, color):
+        """Small colored pill (e.g. status indicator)."""
+        pdf.set_fill_color(*color)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 8.5)
+        width = pdf.get_string_width(_s(text)) + 4
+        pdf.cell(width, 4.5, _s(text), fill=True, align="C",
+                 new_x=XPos.RIGHT, new_y=YPos.TOP)
+        reset_color()
+
+    def table_header(cols, widths):
         pdf.set_x(LM)
-        pdf.set_font("Helvetica", font_style, font_size)
-        for i, (v, w) in enumerate(zip(vals, cws)):
-            last = (i == len(vals) - 1)
-            pdf.cell(w, 5.5, _s(str(v)), border=border, align="C",
+        pdf.set_fill_color(*CLR_TABLE_HEAD)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 8.5)
+        for i, (col, w) in enumerate(zip(cols, widths)):
+            last = (i == len(cols) - 1)
+            pdf.cell(w, 6, _s(col), border=0, fill=True, align="C",
                      new_x=XPos.RIGHT if not last else XPos.LMARGIN,
-                     new_y=YPos.TOP  if not last else YPos.NEXT)
+                     new_y=YPos.TOP if not last else YPos.NEXT)
+        reset_color()
 
-    # ── Titel ──────────────────────────────────────────────────────────────────
-    pdf.set_x(LM)
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(W, 11, "Cycling Fueling Plan",
-             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    def table_row_alt(vals, widths, alt=False, font_size=8.5,
+                      align="C", border_bottom=True):
+        pdf.set_x(LM)
+        if alt:
+            pdf.set_fill_color(*CLR_TABLE_ALT)
+            fill = True
+        else:
+            fill = False
+        pdf.set_font("Helvetica", "", font_size)
+        for i, (v, w) in enumerate(zip(vals, widths)):
+            last = (i == len(vals) - 1)
+            pdf.cell(w, 5.2, _s(str(v)), border=0, fill=fill, align=align,
+                     new_x=XPos.RIGHT if not last else XPos.LMARGIN,
+                     new_y=YPos.TOP if not last else YPos.NEXT)
+        if border_bottom:
+            pdf.set_draw_color(*CLR_BORDER)
+            pdf.line(LM, pdf.get_y(), LM + W, pdf.get_y())
+
+    def progress_bar(pct, width_mm=80, height_mm=3, color=None):
+        """Draws a horizontal progress bar at current cursor."""
+        x = pdf.get_x()
+        y = pdf.get_y() + 1
+        # Background
+        pdf.set_fill_color(230, 230, 235)
+        pdf.rect(x, y, width_mm, height_mm, "F")
+        # Fill
+        fill_w = max(0, min(width_mm, width_mm * pct))
+        c = color or CLR_PRIMARY
+        pdf.set_fill_color(*c)
+        pdf.rect(x, y, fill_w, height_mm, "F")
+        reset_color()
+
+    def status_color_for_pct(pct):
+        """Returns RGB color for a glycogen-rest percentage."""
+        if pct >= 70:
+            return CLR_GREEN
+        elif pct >= 50:
+            return CLR_AMBER
+        elif pct >= 30:
+            return (235, 130, 60)
+        else:
+            return CLR_RED
+
+    # ════════════════════════════════════════════════════════════════════
+    # TITELBLOCK
+    # ════════════════════════════════════════════════════════════════════
+    # Hauptband
+    pdf.set_fill_color(*CLR_PRIMARY)
+    pdf.rect(0, 0, 210, 22, "F")
+    pdf.set_xy(LM, 6)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.cell(W, 10, "Cycling Fueling Plan",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
     pdf.set_x(LM)
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(W, LH, _s(f"Profil: {e['profil_name']}"),
-             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    untertitel = (f"Profil: {e['profil_name']}  -  "
+                  f"erstellt am {datetime.now().strftime('%d.%m.%Y, %H:%M')}")
+    pdf.cell(W, 5, _s(untertitel),
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+    reset_color()
+    pdf.set_y(28)
+
+    # ── Übersichts-Kacheln ──
     pdf.set_x(LM)
-    pdf.cell(W, LH,
-             _s(f"Zone: {e['zone']}  |  Dauer: {e['dauer_h']} h  |  Temp: {e['temp']} °C"),
-             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
-    pdf.ln(4)
+    box_w = (W - 6) / 4
+    box_h = 16
+    eintraege = [
+        ("Dauer", f"{e['dauer_h']} h"),
+        ("Zone", e["zone"]),
+        ("Temp.", f"{e['temp']}{chr(176)}C"),
+        ("Carbs gesamt", f"{e['carbs']['gesamt']} g"),
+    ]
+    for i, (label, val) in enumerate(eintraege):
+        x = LM + i * (box_w + 2)
+        pdf.set_xy(x, 28)
+        pdf.set_fill_color(*CLR_PRIMARY_LIGHT)
+        pdf.rect(x, 28, box_w, box_h, "F")
+        pdf.set_xy(x, 30)
+        pdf.set_text_color(*CLR_MUTED)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.cell(box_w, 4, _s(label), align="C",
+                 new_x=XPos.LEFT, new_y=YPos.NEXT)
+        pdf.set_x(x)
+        pdf.set_text_color(*CLR_PRIMARY)
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(box_w, 8, _s(val), align="C",
+                 new_x=XPos.LEFT, new_y=YPos.NEXT)
+    reset_color()
+    pdf.set_y(48)
 
-    # ── Kohlenhydrate ──────────────────────────────────────────────────────────
-    section("Kohlenhydrate")
-    kv("Gesamt", f"{e['carbs']['gesamt']} g  ({e['carbs']['pro_h']} g/h via {e['carbs']['quelle']})")
-    kv("Basis", f"{e['carbs']['basis']} g")
-    if e["carbs"].get("hm_bonus"):
-        kv("HM-Bonus", f"{e['carbs']['hm_bonus']} g")
-    kv("Aus Gels", f"{e['carbs']['aus_gels']} g")
-    kv("Aus Riegeln", f"{e['carbs']['aus_riegeln']} g")
-    if sf_res.get("ratio_info"):
-        kv("Glukose:Fructose", sf_res["ratio_info"][2])
+    # ════════════════════════════════════════════════════════════════════
+    # ÜBERSICHT
+    # ════════════════════════════════════════════════════════════════════
+    section_main("Uebersicht", "Trainingsplan-Stammdaten")
+    kv("Trainingsmodus",
+       "Indoor (Rolle / Heimtrainer)" if ist_indoor
+       else "Outdoor (Strasse / Gelaende)")
+    kv("Dauer", f"{e['dauer_h']} h")
+    if not ist_indoor:
+        if e.get("distanz_km"):
+            kv("Distanz", f"{e['distanz_km']:.1f} km")
+        if e.get("hoehenmeter"):
+            kv("Hoehenmeter", f"{int(e['hoehenmeter'])} m")
+    if profil.get("koerpergewicht_kg"):
+        kv("Koerpergewicht", f"{profil['koerpergewicht_kg']} kg")
 
-    # ── Wasser ─────────────────────────────────────────────────────────────────
-    section("Wasser")
-    kv("Gesamt", f"{e['wasser']['gesamt']} ml  ({e['wasser']['pro_h']} ml/h)")
-    kv("Aus Gels", f"{e['wasser']['aus_gels']} ml")
-    kv("Aus Flaschen (extra)", f"{e['wasser']['zusaetzlich']} ml")
-    if wf:
-        kv("Auffüllungen", f"{wf.get('auffuellungen', 0)}x  (je ~{wf.get('refill_ml', 0)} ml)")
+    # ── Trainingsintensität ──
+    subsection("Trainingsintensitaet")
+    if e.get("watt") and e.get("ftp"):
+        pct_ftp = round(e["watt"] / e["ftp"] * 100, 1)
+        watt_label = ("Leistung (Durchschnitt)" if ist_indoor
+                      else "Leistung (Normalized Power)")
+        kv(watt_label, f"{e['watt']:.0f} W")
+        kv("FTP", f"{e['ftp']:.0f} W   ->  {pct_ftp}% FTP")
+    elif e.get("hf") and e.get("hr_max"):
+        pct_hrmax = round(e["hf"] / e["hr_max"] * 100, 1)
+        kv("Herzfrequenz", f"{e['hf']:.0f} bpm")
+        kv("HRmax", f"{e['hr_max']} bpm   ->  {pct_hrmax}% HRmax")
+    kv("Zone", zone_namen.get(e["zone"], e["zone"]))
+    kv("Quelle", e["carbs"]["quelle"])
 
-    # ── Softflasks ─────────────────────────────────────────────────────────────
-    section("Softflasks")
-    sf_flaschen = sf_res.get("flaschen", [])
-    if sf_flaschen:
-        for f in sf_flaschen:
-            r = f.get("rezept", {})
-            pdf.set_x(LM)
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(0, LH, _s(f"{f['anzahl']}x {f['name']} ({f['volumen_ml']} ml)"),
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            body(
-                f"Carbs: {f['carbs_pro_flask']} g  |  Malto: {r.get('maltodextrin', 0)} g  |  "
-                f"Fructose: {r.get('fructose', 0)} g  |  Salz: {r.get('salz', 0)} g  |  "
-                f"Wasser: {r.get('wasser', 0)} ml",
-                indent=6,
-            )
-    else:
-        r0 = sf_res.get("rezept", {})
-        kv("Anzahl", sf_res.get("anzahl", 0))
-        kv("Rezept", (
-            f"Malto {r0.get('maltodextrin', 0)} g  |  Fructose {r0.get('fructose', 0)} g  |  "
-            f"Salz {r0.get('salz', 0)} g  |  Wasser {r0.get('wasser', 0)} ml"
-        ))
-
-    # ── Riegel ─────────────────────────────────────────────────────────────────
-    if e.get("riegel"):
-        section("Riegel")
-        for r in e["riegel"]:
-            body(
-                f"{r['anzahl']}x  {r['name']}"
-                f"  (Carbs: {r['carbs_gesamt']} g, davon Zucker: {r['zucker_gesamt']} g)",
-                indent=4,
-            )
-
-    # ── Elektrolyte & Koffein ──────────────────────────────────────────────────
-    section("Elektrolyte")
-    el = e["elektrolyte"]
-    kv("Produkt", el["name"])
-    kv("Menge", f"{el['portion_g']} g x {el['fuellungen']}  =  {el['gesamt_g']} g")
-
-    section("Koffein")
-    ko = e["koffein"]
-    if ko["caps"]:
-        kv("Kapseln", f"{ko['caps']} Stk. "
-                       f"({ko.get('gesamt_mg', 0)} mg, {ko.get('mg_pro_kg', 0)} mg/kg)")
-        kv("Plan", ko["plan"])
-        if ko.get("cap_grund"):
-            kv("Hinweis", f"Dosis gedeckelt – {ko['cap_grund']}")
-    else:
-        kv("Plan", ko["plan"])
-
-    # ── Mix-Intervalle ─────────────────────────────────────────────────────────
-    mix_iv = e.get("mix_intervalle")
-    if mix_iv:
-        section("Trainings-Intervalle (Mix)")
-        total_min = sum(iv.get("dauer_min", 0) for iv in mix_iv)
-        cw  = [22, 30, 32, 30, 34, 26, 16]
-        hdr = ["Zone", "Dauer (min)", "Carbs/h", "Wasser/h", "Watt", "HF (bpm)", "Anteil"]
-        table_row(hdr, cw, font_style="B")
-        for iv in mix_iv:
-            anteil = f"{round(iv['dauer_min'] / total_min * 100)}%" if total_min else ""
-            table_row([
-                iv.get("zone", ""),
-                str(iv.get("dauer_min", 0)),
-                f"{CARBS_PRO_STUNDE.get(iv.get('zone', 'Z2'), 60)} g/h",
-                "-",
-                str(iv["watt"]) if iv.get("watt") else "-",
-                str(iv["hf"])   if iv.get("hf")   else "-",
-                anteil,
-            ], cw)
-
-    # ── Wetter ─────────────────────────────────────────────────────────────────
-    if wetter_info:
-        section("Wetter")
-        kv("Temperatur", (
-            f"{wetter_info['avg_temp']} °C  "
-            f"(min {wetter_info['min_temp']} / max {wetter_info['max_temp']})"
-        ))
-        kv("Sonne", sonne_label.get(wetter_info.get("sonne", ""), wetter_info.get("sonne", "-")))
-        kv("Wind",  f"{wetter_info['avg_wind']} km/h")
+    # ── Wetter ──
+    if wetter_info and not ist_indoor:
+        subsection("Wetterbedingungen")
+        kv("Temperatur (Durchschn.)",
+           f"{wetter_info['avg_temp']}{chr(176)}C  "
+           f"(min {wetter_info['min_temp']} / max {wetter_info['max_temp']})")
+        kv("Sonneneinstrahlung",
+           sonne_label.get(wetter_info.get("sonne", ""),
+                           wetter_info.get("sonne", "-")))
+        kv("Wind (Durchschn.)", f"{wetter_info['avg_wind']} km/h")
         kv("Regen", f"{wetter_info['sum_regen']} mm")
 
         if wetter_punkte and len(wetter_punkte) > 1:
             pdf.ln(2)
             pdf.set_x(LM)
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(0, LH, "Wetterverlauf entlang der Route:",
+            pdf.set_font("Helvetica", "B", 9.5)
+            pdf.cell(W, 5, _s("Wetterverlauf entlang der Route"),
                      new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            cw2 = [20, 28, 54, 32, 28, 28]
-            table_row(["km", "Uhrzeit", "Koordinaten", "Temp (°C)", "Wind", "Regen (mm)"],
-                      cw2, font_style="B")
-            for pt in wetter_punkte:
-                table_row([
+            cols = ["km", "Uhrzeit", "Latitude", "Longitude", "Temp", "Regen"]
+            widths = [20, 25, 38, 38, 30, 35]
+            table_header(cols, widths)
+            for idx, pt in enumerate(wetter_punkte):
+                table_row_alt([
                     str(pt.get("km", "")),
                     pt.get("uhrzeit", ""),
-                    f"{pt.get('lat', 0.0):.4f}, {pt.get('lon', 0.0):.4f}",
-                    f"{pt.get('temp_avg', '')} °C",
-                    "-",
+                    f"{pt.get('lat', 0):.4f}",
+                    f"{pt.get('lon', 0):.4f}",
+                    f"{pt.get('temp_avg', '')}{chr(176)}C",
                     f"{pt.get('regen_mm', '')} mm",
-                ], cw2)
+                ], widths, alt=(idx % 2 == 1))
+    elif ist_indoor:
+        subsection("Trainingsumgebung")
+        kv("Raumtemperatur", f"{e['temp']}{chr(176)}C")
 
-    # ── Resupply-Stopps ────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════
+    # KOHLENHYDRATE
+    # ════════════════════════════════════════════════════════════════════
+    strategie_label = (
+        f"Konstant ({konstant_g_h} g/h jede Stunde)"
+        if (ist_konstant and konstant_g_h is not None)
+        else "Progressiv (steigt ueber die Zeit)"
+    )
+    section_main("Kohlenhydrate", f"Strategie: {strategie_label}")
+
+    subsection("Gesamtbedarf")
+    kv("Gesamt-Carbs", f"{e['carbs']['gesamt']} g")
+    kv("Pro Stunde (Durchschn.)",
+       f"{konstant_g_h} g/h" if (ist_konstant and konstant_g_h is not None)
+       else f"{e['carbs']['pro_h_avg']} g/h")
+    kv("Basis-Berechnung", f"{e['carbs']['basis']} g")
+    if e["carbs"].get("hm_bonus"):
+        kv("Hoehenmeter-Bonus", f"+{e['carbs']['hm_bonus']} g")
+
+    subsection("Verteilung Gels & Riegel")
+    gesamt = max(1, e["carbs"]["gesamt"])
+    gels_pct = round(e["carbs"]["aus_gels"] / gesamt * 100)
+    rieg_pct = round(e["carbs"]["aus_riegeln"] / gesamt * 100)
+    kv("Aus Gels", f"{e['carbs']['aus_gels']} g  ({gels_pct}%)")
+    kv("Aus Riegeln", f"{e['carbs']['aus_riegeln']} g  ({rieg_pct}%)")
+    if sf_res.get("ratio_info"):
+        kv("Glukose:Fructose", sf_res["ratio_info"][2])
+
+    # Progressiver Stundenplan ODER Konstante Aufschlüsselung
+    prog_txt = e["carbs"].get("progressiv", [])
+    if ist_konstant and konstant_g_h is not None:
+        subsection("Konstante Zufuhr pro Stunde")
+        gesamt_k = round(konstant_g_h * e["dauer_h"])
+        kv("Pro Stunde", f"{konstant_g_h} g")
+        kv("Dauer", f"{e['dauer_h']} h")
+        kv("Gesamt-Menge", f"{gesamt_k} g")
+    elif prog_txt and len(prog_txt) > 1:
+        subsection("Progressiver Stundenplan")
+        # Spaltenbreiten: Stunde · g/h · Menge · Verlauf-Balken · %
+        cols = ["Stunde", "g/h", "Menge", "Verlauf", "%"]
+        widths = [38, 24, 24, 80, 20]
+        # Summe = 186 = W ✓
+        table_header(cols, widths)
+        max_rate = max(s["carbs_g_h"] for s in prog_txt) or 1
+        ROW_H = 6.0
+        BAR_H = 2.8
+        BAR_PAD = 4  # Innenabstand links/rechts in der Bar-Spalte
+        for idx, s in enumerate(prog_txt):
+            stunde_lbl = (f"{s['start_min']}-{s['end_min']} min"
+                          if s["dauer_min"] < 60
+                          else f"Stunde {s['stunde']}")
+            row_y = pdf.get_y()
+            alt = (idx % 2 == 1)
+
+            # Alt-Row Hintergrund
+            if alt:
+                pdf.set_fill_color(*CLR_TABLE_ALT)
+                pdf.rect(LM, row_y, W, ROW_H, "F")
+                reset_color()
+
+            # Spalten 1–3: Text (Stunde, g/h, Menge)
+            pdf.set_xy(LM, row_y)
+            pdf.set_font("Helvetica", "", 9)
+            pdf.cell(widths[0], ROW_H, _s(stunde_lbl), align="C",
+                     new_x=XPos.RIGHT, new_y=YPos.TOP)
+            pdf.cell(widths[1], ROW_H, _s(f"{s['carbs_g_h']} g"), align="C",
+                     new_x=XPos.RIGHT, new_y=YPos.TOP)
+            pdf.cell(widths[2], ROW_H, _s(f"{s['carbs_g']} g"), align="C",
+                     new_x=XPos.RIGHT, new_y=YPos.TOP)
+
+            # Spalte 4: Progress-Bar (manuell mit korrekter X/Y-Position zeichnen)
+            pct = s["carbs_g_h"] / max_rate
+            bar_x_start = LM + widths[0] + widths[1] + widths[2] + BAR_PAD
+            bar_width = widths[3] - 2 * BAR_PAD
+            bar_y = row_y + (ROW_H - BAR_H) / 2
+            # Hintergrund (hellgrau)
+            pdf.set_fill_color(225, 228, 235)
+            pdf.rect(bar_x_start, bar_y, bar_width, BAR_H, "F")
+            # Füllung
+            fill_w = max(0.5, min(bar_width, bar_width * pct))
+            pdf.set_fill_color(*CLR_PRIMARY)
+            pdf.rect(bar_x_start, bar_y, fill_w, BAR_H, "F")
+            reset_color()
+
+            # Spalte 5: Prozent-Text
+            pdf.set_xy(LM + widths[0] + widths[1] + widths[2] + widths[3], row_y)
+            pdf.set_font("Helvetica", "", 8.5)
+            pdf.cell(widths[4], ROW_H, _s(f"{int(round(pct * 100))}%"),
+                     align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            # Untere Zeilen-Trennlinie
+            pdf.set_draw_color(*CLR_BORDER)
+            pdf.set_line_width(0.15)
+            pdf.line(LM, row_y + ROW_H, LM + W, row_y + ROW_H)
+
+        # Summe
+        pdf.ln(1)
+        pdf.set_x(LM)
+        pdf.set_font("Helvetica", "B", 9.5)
+        pdf.set_fill_color(*CLR_PRIMARY_LIGHT)
+        pdf.cell(W, 6,
+                 _s(f"   Summe: {sum(s['carbs_g'] for s in prog_txt)} g   |   "
+                    f"Durchschnitt: {e['carbs']['pro_h_avg']} g/h"),
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True, align="L")
+        reset_color()
+
+    # ════════════════════════════════════════════════════════════════════
+    # WASSER & ELEKTROLYTE
+    # ════════════════════════════════════════════════════════════════════
+    section_main("Wasser & Elektrolyte")
+
+    subsection("Wassermenge")
+    kv("Gesamt", f"{e['wasser']['gesamt']} ml  ({e['wasser']['pro_h']} ml/h)")
+    kv("Aus Gels", f"{e['wasser']['aus_gels']} ml")
+    kv("Aus Trinkflaschen", f"{e['wasser']['zusaetzlich']} ml")
+    if profil.get("schweissrate", {}).get("preset"):
+        preset = profil["schweissrate"]["preset"]
+        preset_label = {"wenig": "Wenig-Schwitzer",
+                        "mittel": "Mittel-Schwitzer",
+                        "viel": "Viel-Schwitzer",
+                        "kalibriert": "Kalibriert"}.get(preset, preset)
+        kv("Schweisstyp", preset_label)
+    if wf and wf.get("auffuellungen", 0) > 0:
+        kv("Auffuellungen",
+           f"{wf['auffuellungen']}x  (je ~{wf.get('refill_ml', 0)} ml)")
+
+    subsection("Elektrolyte")
+    el = e["elektrolyte"]
+    kv("Produkt", el["name"])
+    kv("Portion", f"{el['portion_g']} g")
+    kv("Anzahl Portionen", f"{el['fuellungen']}x")
+    kv("Gesamt", f"{el['gesamt_g']} g")
+    minerals = el.get("mineralien", {})
+    nicht_null = {m: v for m, v in minerals.items() if v}
+    if nicht_null:
+        pdf.ln(1)
+        body("Mineralstoff-Gesamtmenge:", indent=2, italic=True)
+        for m_name in ["natrium", "kalium", "chlorid", "calcium", "magnesium"]:
+            if minerals.get(m_name):
+                body(f"   * {m_name.capitalize()}: {minerals[m_name]} mg",
+                     indent=4)
+
+    # ════════════════════════════════════════════════════════════════════
+    # GLYKOGEN-SPEICHERBILANZ
+    # ════════════════════════════════════════════════════════════════════
+    if bilanz:
+        section_main("Glykogen-Speicherbilanz",
+                     "Wie sich die Glykogenspeicher ueber die Dauer entwickeln")
+
+        ts_label = {"untrained": "Untrainiert",
+                    "trained": "Trainiert",
+                    "trained_loaded": "Trainiert + Carbo-Loading",
+                    "elite_loaded": "Elite + Loading"}.get(
+                        bilanz.get("trainings_status", ""),
+                        bilanz.get("trainings_status", "-"))
+
+        subsection("Speicherstatus")
+        kv("Koerpergewicht", f"{bilanz['koerpergewicht_kg']} kg")
+        kv("Trainingsstatus", ts_label)
+        kv("Glykogenkapazitaet", f"{bilanz['g_pro_kg']} g/kg")
+        kv("Speicher voll", f"{bilanz['speicher_voll_g']} g")
+        kv("Start-Fuellstand",
+           f"{int(start_voll_pct * 100)}%  ({bilanz['speicher_start_g']} g)")
+        kv("Verbrauch (echt)",
+           f"{bilanz['verbrauch_eff_pro_h']:.0f} g/h "
+           f"{'(steigt mit Drift)' if drift_rate > 0 else '(konstant)'}")
+
+        # Endwert mit Status-Farbe
+        end_pct = bilanz["speicher_end_pct"]
+        status_clr = status_color_for_pct(end_pct)
+        pdf.set_x(LM)
+        pdf.set_font("Helvetica", "B", 9.5)
+        pdf.cell(55, LH, "Speicher am Ende:", new_x=XPos.RIGHT, new_y=YPos.TOP)
+        pdf.set_font("Helvetica", "", 9.5)
+        pdf.cell(40, LH, _s(f"{end_pct:.0f}% ({bilanz['speicher_end_g']} g)"),
+                 new_x=XPos.RIGHT, new_y=YPos.TOP)
+        if end_pct >= 70:
+            label = "Komfortabel"
+        elif end_pct >= 50:
+            label = "Eng kalkuliert"
+        elif end_pct >= 30:
+            label = "Kritisch"
+        else:
+            label = "Hungerast-Risiko"
+        colored_pill(label, status_clr)
+        pdf.ln(LH)
+
+        # Cardiac Drift
+        if drift_rate > 0:
+            subsection("Cardiac Drift")
+            verbrauch_basis = bilanz["verbrauch_eff_pro_h"]
+            verbrauch_end = verbrauch_basis * (1 + drift_rate * (e["dauer_h"] - 1))
+            kv("Drift-Rate", f"+{drift_rate*100:.1f}% pro Stunde")
+            kv("Verbrauch Stunde 1", f"{verbrauch_basis:.0f} g/h")
+            kv(f"Verbrauch Stunde {int(e['dauer_h'])}",
+               f"{verbrauch_end:.0f} g/h")
+            note("Quelle: Coyle & Gonzalez-Alonso 2001, Wingo et al. 2012. "
+                 "Berechnet aus Temperatur, Indoor/Outdoor und Zonen-Intensitaet.",
+                 indent=2)
+
+        # Stündlicher Verlauf
+        stunden = bilanz.get("stunden", [])
+        if stunden:
+            subsection("Stuendlicher Verlauf")
+            cols = ["Stunde", "Verbrauch", "Zufuhr", "Aus Speicher",
+                    "Speicher", "Rest %"]
+            widths = [25, 33, 28, 34, 28, 38]
+            table_header(cols, widths)
+            for idx, s in enumerate(stunden):
+                aus_sp = ("[OK] gedeckt" if s["gedeckt"]
+                          else f"+{s['defizit_g']:.0f} g")
+                table_row_alt([
+                    f"{s['stunde_bis']:.1f} h",
+                    f"{s['verbrauch_g']:.0f} g",
+                    f"{s['zufuhr_g']:.0f} g",
+                    aus_sp,
+                    f"{s['speicher_rest_g']} g",
+                    f"{s['speicher_rest_pct']:.0f}%",
+                ], widths, alt=(idx % 2 == 1))
+
+        # Empfehlungen
+        empfehlungen = bilanz.get("empfehlungen", [])
+        if empfehlungen:
+            subsection("Empfehlungen")
+            for emp in empfehlungen:
+                clean = emp.replace("**", "")
+                body(f"* {clean}", indent=2)
+
+    # ════════════════════════════════════════════════════════════════════
+    # SOFTFLASKS
+    # ════════════════════════════════════════════════════════════════════
+    sf_flaschen = sf_res.get("flaschen", [])
+    if sf_flaschen or sf_res.get("anzahl", 0) > 0:
+        section_main("Softflasks", "Selbstgemischte Carb-Gele")
+        if sf_flaschen:
+            for f in sf_flaschen:
+                r = f.get("rezept", {})
+                pdf.ln(1)
+                pdf.set_x(LM)
+                pdf.set_fill_color(*CLR_PRIMARY_LIGHT)
+                pdf.set_font("Helvetica", "B", 10)
+                pdf.cell(W, 6,
+                         _s(f"   {f['anzahl']}x  {f['name']}  "
+                            f"({f['volumen_ml']} ml)"),
+                         new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+                reset_color()
+                cols = ["Carbs", "Maltodextrin", "Fructose", "Salz", "Wasser"]
+                widths = [37, 37, 37, 37, 38]
+                table_header(cols, widths)
+                table_row_alt([
+                    f"{f['carbs_pro_flask']} g",
+                    f"{r.get('maltodextrin', 0)} g",
+                    f"{r.get('fructose', 0)} g",
+                    f"{r.get('salz', 0)} g",
+                    f"{r.get('wasser', 0)} ml",
+                ], widths, alt=False, font_size=10)
+        else:
+            r0 = sf_res.get("rezept", {})
+            kv("Anzahl", sf_res.get("anzahl", 0))
+            kv("Carbs/Flask", f"{sf_res.get('carbs_pro_flask', 0)} g")
+            kv("Maltodextrin", f"{r0.get('maltodextrin', 0)} g")
+            kv("Fructose", f"{r0.get('fructose', 0)} g")
+            kv("Salz", f"{r0.get('salz', 0)} g")
+            kv("Wasser", f"{r0.get('wasser', 0)} ml")
+
+    # ════════════════════════════════════════════════════════════════════
+    # RIEGEL
+    # ════════════════════════════════════════════════════════════════════
+    if e.get("riegel"):
+        section_main("Riegel & Snacks")
+        cols = ["Anz.", "Name", "Carbs/Stk", "Carbs gesamt", "Zucker gesamt"]
+        widths = [18, 78, 26, 30, 34]
+        table_header(cols, widths)
+        gesamt_anz, gesamt_carbs, gesamt_zucker = 0, 0, 0
+        for idx, r in enumerate(e["riegel"]):
+            table_row_alt([
+                f"{r['anzahl']}x",
+                r["name"],
+                f"{r['carbs_g_pro_stueck']} g",
+                f"{r['carbs_gesamt']} g",
+                f"{r['zucker_gesamt']} g",
+            ], widths, alt=(idx % 2 == 1), align="L"
+               if False else "C")
+            gesamt_anz += r["anzahl"]
+            gesamt_carbs += r["carbs_gesamt"]
+            gesamt_zucker += r["zucker_gesamt"]
+        # Summenzeile
+        pdf.ln(1)
+        pdf.set_x(LM)
+        pdf.set_font("Helvetica", "B", 9.5)
+        pdf.set_fill_color(*CLR_PRIMARY_LIGHT)
+        pdf.cell(W, 5.5,
+                 _s(f"   GESAMT: {gesamt_anz} Riegel  |  "
+                    f"{gesamt_carbs} g Carbs  |  {gesamt_zucker} g Zucker"),
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+        reset_color()
+
+    # ════════════════════════════════════════════════════════════════════
+    # KOFFEIN
+    # ════════════════════════════════════════════════════════════════════
+    _ko = e["koffein"]
+    if _ko.get("caps", 0) > 0:
+        section_main("Koffein-Plan",
+                     "Dosierung nach ISSN 2021: 3 mg/kg + 1,5 mg/kg alle 2 h")
+        kv("Kapseln gesamt", f"{_ko['caps']} Stueck")
+        kv("Gesamt-Koffein", f"{_ko.get('gesamt_mg', 0)} mg")
+        kv("Pro kg Koerpergewicht",
+           f"{_ko.get('mg_pro_kg', 0):.2f} mg/kg  (Ziel: 3-6 mg/kg)")
+        if _ko.get("cap_grund"):
+            kv("Sicherheits-Cap", _ko["cap_grund"])
+
+        # Einnahme-Plan
+        pdf.ln(1)
+        subsection("Einnahme-Plan")
+        for t in _ko.get("timings", []):
+            body(f"   * {t['label']}", indent=2)
+
+    # ════════════════════════════════════════════════════════════════════
+    # MIX-INTERVALLE
+    # ════════════════════════════════════════════════════════════════════
+    mix_iv = e.get("mix_intervalle")
+    if mix_iv:
+        section_main("Trainings-Intervalle (Mix)")
+        total_min = sum(iv.get("dauer_min", 0) for iv in mix_iv)
+        cols = ["Zone", "Dauer", "Anteil", "Carbs/h", "Watt", "HF"]
+        widths = [24, 30, 26, 36, 35, 35]
+        table_header(cols, widths)
+        for idx, iv in enumerate(mix_iv):
+            anteil = (f"{round(iv['dauer_min'] / total_min * 100)}%"
+                      if total_min else "-")
+            watt = f"{iv['watt']} W" if iv.get("watt") else "-"
+            hf = f"{iv['hf']} bpm" if iv.get("hf") else "-"
+            table_row_alt([
+                iv.get("zone", ""),
+                f"{iv.get('dauer_min', 0)} min",
+                anteil,
+                f"{CARBS_PRO_STUNDE.get(iv.get('zone', 'Z2'), 60)} g/h",
+                watt, hf,
+            ], widths, alt=(idx % 2 == 1))
+        pdf.ln(1)
+        body(f"Gesamtdauer: {total_min} min  |  "
+             f"Gewichteter Schnitt: {e['carbs']['pro_h']} g/h",
+             italic=True, indent=2)
+
+    # ════════════════════════════════════════════════════════════════════
+    # GPX-ROUTE
+    # ════════════════════════════════════════════════════════════════════
+    if gpx_data:
+        section_main("GPX-Route")
+        kv("Streckenname", gpx_data.get("name", "-"))
+        kv("Distanz", f"{gpx_data.get('distanz_km', 0):.1f} km")
+        kv("Hoehenmeter (aufwaerts)", f"{int(gpx_data.get('hoehenmeter_auf', 0))} m")
+        kv("Hoehenmeter (abwaerts)", f"{int(gpx_data.get('hoehenmeter_ab', 0))} m")
+        kv("Anzahl Trackpunkte", f"{len(gpx_data.get('points', []))}")
+
+    # ════════════════════════════════════════════════════════════════════
+    # RESUPPLY-STOPPS
+    # ════════════════════════════════════════════════════════════════════
     if resupply_stopps:
-        section("Resupply-Stopps")
+        section_main("Resupply-Stopps",
+                     "Wo Wasser auffuellen und Carbs nachkaufen")
         for i, stopp in enumerate(resupply_stopps):
             needs = []
             if stopp.get("braucht_wasser"): needs.append("Wasser")
             if stopp.get("braucht_carbs"):  needs.append("Carbs")
+            pdf.ln(1)
             pdf.set_x(LM)
+            pdf.set_fill_color(*CLR_ACCENT)
+            pdf.set_text_color(255, 255, 255)
             pdf.set_font("Helvetica", "B", 10)
-            pdf.set_fill_color(240, 240, 248)
             pdf.cell(W, 6.5,
-                     _s(f"Stopp {i + 1}  |  km {stopp.get('km', '?')}  [{' + '.join(needs)}]"),
+                     _s(f"   STOPP {i + 1}  -  km {stopp.get('km', '?')}  "
+                        f"-  [{' + '.join(needs)}]"),
                      new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+            reset_color()
+            pdf.set_font("Helvetica", "", 9.5)
+
             if stopp.get("lat"):
-                note(f"Position: {stopp['lat']:.5f}° N,  {stopp['lon']:.5f}° O")
+                kv("Position",
+                   f"{stopp['lat']:.5f}{chr(176)} N, "
+                   f"{stopp['lon']:.5f}{chr(176)} E", label_w=40)
+                kv("Google Maps",
+                   f"https://maps.google.com/?q={stopp['lat']:.5f},"
+                   f"{stopp['lon']:.5f}", label_w=40)
             if stopp.get("braucht_wasser"):
-                body(f"Wasser auffüllen: ~{stopp.get('wasser_refill_ml', '?')} ml", indent=6)
+                kv("Wasser auffuellen",
+                   f"~{stopp.get('wasser_refill_ml', '?')} ml", label_w=40)
             if stopp.get("braucht_carbs"):
                 einkauf = stopp.get("carbs_einkauf_g", 0)
-                body(f"Carbs kaufen: ~{einkauf} g", indent=6)
+                kv("Carbs kaufen", f"~{einkauf} g", label_w=40)
                 if einkauf:
                     note(
                         f"z.B. {math.ceil(einkauf / 35)} Riegel (a 35 g)  |  "
                         f"{round(einkauf / 25)} Bananen  |  "
                         f"{round(einkauf / 0.85):.0f} g Gummibaerchen",
-                        indent=12,
+                        indent=4,
                     )
             pois = stopp.get("poi_ergebnisse", [])
             if pois:
-                pdf.set_x(LM + 6)
-                pdf.set_font("Helvetica", "B", 9)
-                pdf.cell(0, 5, "Empfohlene Einkaufsstationen:",
-                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                pdf.ln(0.5)
+                body("Empfohlene Einkaufsstationen:", indent=2, italic=True)
                 for rank, p in enumerate(pois[:4]):
                     adresse = (
-                        p.get("strasse", "") + (f", {p['ort']}" if p.get("ort") else "")
+                        p.get("strasse", "")
+                        + (f", {p['ort']}" if p.get("ort") else "")
                     ).strip(", ")
-                    marker = "* " if rank == 0 else "  "
-                    body(
-                        f"{marker}{p['name']} ({p['typ']})"
-                        f"  |  km {p['route_km']}  |  {p['dist_m']} m zur Route"
-                        + (f"  |  {adresse}" if adresse else ""),
-                        indent=12,
-                    )
-            pdf.ln(2)
+                    marker = "  *" if rank == 0 else "   "
+                    text = (f"{marker} {p['name']} ({p['typ']})  -  "
+                            f"km {p['route_km']}  -  {p['dist_m']} m zur Route")
+                    if adresse:
+                        text += f"  -  {adresse}"
+                    body(text, indent=4)
+            pdf.ln(1)
 
-    # ── Footer ─────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════
+    # FOOTER auf jeder Seite
+    # ════════════════════════════════════════════════════════════════════
+    # Manuelle Footer-Zeile am Ende
+    pdf.ln(8)
+    pdf.set_draw_color(*CLR_BORDER)
+    pdf.set_line_width(0.3)
+    pdf.line(LM, pdf.get_y(), LM + W, pdf.get_y())
+    pdf.ln(2)
+    pdf.set_text_color(*CLR_MUTED)
+    pdf.set_font("Helvetica", "", 8)
     pdf.set_x(LM)
-    pdf.set_font("Helvetica", "I", 8)
-    pdf.set_text_color(160, 160, 160)
-    pdf.cell(W, 5,
-             _s(f"Erstellt mit Cycling Fueling Planner  |  {datetime.now().strftime('%d.%m.%Y %H:%M')}"),
+    pdf.cell(W, 4,
+             _s(f"Erstellt mit Cycling Fueling Planner  -  "
+                f"{datetime.now().strftime('%d.%m.%Y %H:%M')}"),
              new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
     pdf.set_x(LM)
     pdf.cell(W, 4,
-             _s("(c) 2024-2025 Felix Manasov. Alle Rechte vorbehalten. Nutzung der App erlaubt, "
-                "Kopieren/Weitergabe des Codes untersagt."),
+             _s("(c) 2024-2026 Felix Manasov. Alle Rechte vorbehalten. "
+                "Nutzung der App erlaubt, Kopieren/Weitergabe des Codes untersagt."),
              new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    pdf.set_x(LM)
+    pdf.cell(W, 4,
+             _s("App: https://fueling-planner.streamlit.app  |  "
+                "Doku: github.com/FeDaSy/fueling-planner"),
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    reset_color()
 
     return bytes(pdf.output())
 
@@ -3817,8 +4634,23 @@ genauer als die Pauschalrechnung.
         rs = berechne_resupply_stopps(profil, e, _gpx_dl)
     # konstant_g_h ist nur gesetzt wenn der User die Konstant-Strategie gewählt hat
     _export_konstant = konstant_g_h if (ist_konstant and hat_progressiv_data and konstant_g_h is not None) else None
-    plan_text = erstelle_plan_text(e, w, wp, rs, konstant_g_h=_export_konstant)
-    pdf_bytes = erstelle_plan_pdf(e, w, wp, rs)
+
+    # Export-Kontext: alle UI-State-Werte bündeln, damit Export alles abdecken kann
+    export_context = {
+        "profil": profil,
+        "ist_indoor": ist_indoor,
+        "ist_konstant": ist_konstant,
+        "konstant_g_h": _export_konstant,
+        "bilanz": bilanz,
+        "drift_rate": drift_rate,
+        "start_voll_pct": start_voll_pct,
+        "zufuhr_pro_h_fallback": zufuhr_pro_h_fallback,
+        "zufuhr_skalar": zufuhr_skalar,
+        "gpx_data": _gpx_dl,
+    }
+
+    plan_text = erstelle_plan_text(e, w, wp, rs, export_context=export_context)
+    pdf_bytes = erstelle_plan_pdf(e, w, wp, rs, export_context=export_context)
     dl_col1, dl_col2 = st.columns(2)
     with dl_col1:
         st.download_button(

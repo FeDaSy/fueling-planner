@@ -624,19 +624,53 @@ Bei schweren Sportler/innen (z. B. 90 kg):
 
 4d) Timing-Verteilung
 ───────────────────────
-Die berechneten Kapseln werden zeitlich verteilt:
+Die berechneten Kapseln werden in sinnvollen Bündeln auf wenige
+Einnahme-Zeitpunkte verteilt:
 
-  - Initial-Caps: zum Start (~30 min davor)
-  - Erhaltungs-Caps: gleichmäßig zwischen Stunde 2 und (dauer − 0,5 h)
-    verteilt
-  - Mindestens 0,5 h Puffer zum Ende, damit Koffein nicht direkt vor
-    Schlafenszeit-relevantem Zeitpunkt zugeführt wird
+  1. INITIAL-DOSIS (zum Start, ~30 min davor)
+     initial_caps = round(initial_mg_planned / mg_pro_cap)
+     Gedeckelt bei MAX. 200 mg pro Einzeldosis (EFSA-Akut-Limit).
+     → Bei 50-mg-Caps: max. 4 Caps am Start, auch bei sehr schweren
+       Athleten.
 
-Beispiel 6 h Belastung, 75 kg, 50-mg-Caps (8 Caps total):
-  - Start: 5 Caps (250 mg)
-  - h2.0: 1 Cap
-  - h3.7: 1 Cap
-  - h5.5: 1 Cap
+  2. ERHALTUNGSDOSEN (n Slots gleichmäßig zwischen h2 und dauer-0,5)
+     remaining_caps = total_caps − initial_caps
+     Werden auf n_maintenance Slots gebündelt:
+       base_per_slot = remaining_caps // n_maintenance
+       extra        = remaining_caps mod n_maintenance
+     Die ersten 'extra' Slots bekommen je 1 Cap mehr (Front-Load).
+
+  3. PUFFER ZUM ENDE: mindestens 0,5 h vor Belastungsende,
+     damit Koffein nicht zu nah am möglichen Schlaf-Zeitpunkt liegt.
+
+
+Beispiele für eine/n 75-kg-Sportler/in mit 50-mg-Caps:
+
+  Dauer    Caps   Plan
+  ─────────────────────────────────────────────────────────────────
+  2 h      4      Start: 4 Caps
+                  (1 Initial-Dosis, keine Erhaltung)
+
+  3 h      7      Start: 4 Caps  |  h2,2: 3 Caps
+                  (1 Maintenance-Slot bekommt alle 3 Rest-Caps)
+
+  5 h      8      Start: 4 Caps  |  h2,0: 2 Caps  |  h4,5: 2 Caps
+                  (2 Maintenance-Slots, gleichmäßig verteilt)
+
+  8 h      8      Start: 3 Caps  |  h2,0: 2 Caps  |  h4,8: 2 Caps
+                                |  h7,5: 1 Cap
+                  (Initial reduziert wegen EFSA-Cap, 3 Slots)
+
+  12 h     8      Start: 2  |  h2,0: 2  |  h4,4: 1  |  h6,8: 1
+                            |  h9,1: 1  |  h11,5: 1
+                  (Initial stark reduziert, breite Verteilung)
+
+
+WICHTIG: Die alten Versionen verteilten remaining_caps auf SEPARATE
+Zeitpunkte (1 Cap pro Slot), wodurch z.B. bei 3 h drei Caps in einem
+Fenster von nur 30 Minuten gebündelt wurden (h2,0 / h2,2 / h2,5).
+Die neue Logik bündelt mehrere Caps pro physiologisch sinnvollem
+Maintenance-Slot statt sie über zu kurze Fenster zu strecken.
 
 
 4e) Was sich gegenüber der alten Version geändert hat
