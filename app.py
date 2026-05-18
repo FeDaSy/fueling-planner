@@ -28,6 +28,23 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+# ── Timezone-Handling ─────────────────────────────────────────────────────────
+# Streamlit Cloud läuft in UTC; deutsche Nutzer würden sonst falsche Uhrzeit
+# sehen. Wir verwenden Europe/Berlin (passt automatisch zwischen MEZ/MESZ).
+try:
+    from zoneinfo import ZoneInfo
+    _LOCAL_TZ = ZoneInfo("Europe/Berlin")
+except ImportError:
+    _LOCAL_TZ = None  # < Python 3.9 oder ohne tzdata
+
+
+def jetzt_local():
+    """Aktuelle Zeit in Europe/Berlin (Fallback: System-Time bei fehlendem zoneinfo)."""
+    if _LOCAL_TZ is not None:
+        return datetime.now(_LOCAL_TZ)
+    return datetime.now()
+
+
 import streamlit as st
 
 # ── Optional: Browser-localStorage für persistente Profile ────────────────────
@@ -680,19 +697,27 @@ def berechne_koffein(profil, dauer_h):
             base_per_slot = remaining_caps // n_maintenance
             extra = remaining_caps % n_maintenance
             end_dose_at = max(2.0, dauer_h - 0.5)
+
+            def _fmt_zeit(t_h):
+                """Float-Stunden -> 'h H:MM' (z.B. 8.9 -> 'h 8:54')."""
+                # Auf volle Minuten runden, damit 2.5 -> 2:30 ergibt
+                total_min = int(round(t_h * 60))
+                h = total_min // 60
+                m = total_min % 60
+                return f"h {h}:{m:02d}"
+
             for i in range(n_maintenance):
                 if n_maintenance == 1:
-                    t = round((2.0 + end_dose_at) / 2.0, 1)
+                    t = (2.0 + end_dose_at) / 2.0
                 else:
                     t = 2.0 + (end_dose_at - 2.0) * i / (n_maintenance - 1)
-                    t = round(t, 1)
                 # Erste 'extra' Slots bekommen einen Cap mehr (Front-Load)
                 caps_this_slot = base_per_slot + (1 if i < extra else 0)
                 if caps_this_slot > 0:
-                    label = f"h{t:.1f}: {caps_this_slot} Cap" + (
-                        "s" if caps_this_slot != 1 else "")
+                    label = (f"{_fmt_zeit(t)}: {caps_this_slot} Cap"
+                             + ("s" if caps_this_slot != 1 else ""))
                     timings.append({
-                        "zeit_h": t,
+                        "zeit_h": round(t, 2),
                         "caps": caps_this_slot,
                         "label": label,
                     })
@@ -1264,7 +1289,7 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
     lines += sub_head("ℹ️  ÜBERSICHT")
     lines += [
         kv("Profil", e.get("profil_name", "—")),
-        kv("Erstellt am", datetime.now().strftime("%d.%m.%Y, %H:%M Uhr")),
+        kv("Erstellt am", jetzt_local().strftime("%d.%m.%Y, %H:%M Uhr")),
         kv("Trainingsmodus", "Indoor (Rolle / Heimtrainer)" if ist_indoor
                               else "Outdoor (Straße / Gelände)"),
         kv("Dauer", f"{e['dauer_h']} h"),
@@ -1599,19 +1624,6 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
                      f"|  Gewichteter Schnitt: {e['carbs']['pro_h']} g/h")
 
     # ════════════════════════════════════════════════════════════════════
-    # GPX-ROUTE
-    # ════════════════════════════════════════════════════════════════════
-    if gpx_data:
-        lines += section_head("GPX-ROUTE", "🗺")
-        lines += [
-            kv("Streckenname", gpx_data.get("name", "—")),
-            kv("Distanz", f"{gpx_data.get('distanz_km', 0):.1f} km"),
-            kv("Höhenmeter ↑", f"{int(gpx_data.get('hoehenmeter_auf', 0))} m"),
-            kv("Höhenmeter ↓", f"{int(gpx_data.get('hoehenmeter_ab', 0))} m"),
-            kv("Anzahl Trackpunkte", f"{len(gpx_data.get('points', []))}"),
-        ]
-
-    # ════════════════════════════════════════════════════════════════════
     # RESUPPLY-STOPPS
     # ════════════════════════════════════════════════════════════════════
     if resupply_stopps:
@@ -1907,7 +1919,7 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     pdf.set_x(LM)
     pdf.set_font("Helvetica", "", 10)
     untertitel = (f"Profil: {e['profil_name']}  -  "
-                  f"erstellt am {datetime.now().strftime('%d.%m.%Y, %H:%M')}")
+                  f"erstellt am {jetzt_local().strftime('%d.%m.%Y, %H:%M')}")
     pdf.cell(W, 5, _s(untertitel),
              new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
     reset_color()
@@ -2053,53 +2065,67 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
         ROW_H = 6.0
         BAR_H = 2.8
         BAR_PAD = 4  # Innenabstand links/rechts in der Bar-Spalte
-        for idx, s in enumerate(prog_txt):
-            stunde_lbl = (f"{s['start_min']}-{s['end_min']} min"
-                          if s["dauer_min"] < 60
-                          else f"Stunde {s['stunde']}")
-            row_y = pdf.get_y()
-            alt = (idx % 2 == 1)
 
-            # Alt-Row Hintergrund
-            if alt:
-                pdf.set_fill_color(*CLR_TABLE_ALT)
-                pdf.rect(LM, row_y, W, ROW_H, "F")
+        # Auto-Page-Break während der manuellen rect()-Zeichnungen deaktivieren,
+        # damit Hintergrund + Text + Bar + Trennlinie nicht durch automatischen
+        # Seitenumbruch in der Mitte zerrissen werden.
+        pdf.set_auto_page_break(auto=False)
+        try:
+            for idx, s in enumerate(prog_txt):
+                # Manueller Page-Break-Check VOR der Zeile (Platz: ROW_H + 1 Reserve)
+                if pdf.get_y() + ROW_H + 1 > pdf.h - 18:
+                    pdf.add_page()
+                    table_header(cols, widths)  # Header auf neuer Seite wiederholen
+
+                stunde_lbl = (f"{s['start_min']}-{s['end_min']} min"
+                              if s["dauer_min"] < 60
+                              else f"Stunde {s['stunde']}")
+                row_y = pdf.get_y()
+                alt = (idx % 2 == 1)
+
+                # Alt-Row Hintergrund
+                if alt:
+                    pdf.set_fill_color(*CLR_TABLE_ALT)
+                    pdf.rect(LM, row_y, W, ROW_H, "F")
+                    reset_color()
+
+                # Spalten 1–3: Text (Stunde, g/h, Menge)
+                pdf.set_xy(LM, row_y)
+                pdf.set_font("Helvetica", "", 9)
+                pdf.cell(widths[0], ROW_H, _s(stunde_lbl), align="C",
+                         new_x=XPos.RIGHT, new_y=YPos.TOP)
+                pdf.cell(widths[1], ROW_H, _s(f"{s['carbs_g_h']} g"), align="C",
+                         new_x=XPos.RIGHT, new_y=YPos.TOP)
+                pdf.cell(widths[2], ROW_H, _s(f"{s['carbs_g']} g"), align="C",
+                         new_x=XPos.RIGHT, new_y=YPos.TOP)
+
+                # Spalte 4: Progress-Bar (manuell mit korrekter X/Y-Position zeichnen)
+                pct = s["carbs_g_h"] / max_rate
+                bar_x_start = LM + widths[0] + widths[1] + widths[2] + BAR_PAD
+                bar_width = widths[3] - 2 * BAR_PAD
+                bar_y = row_y + (ROW_H - BAR_H) / 2
+                # Hintergrund (hellgrau)
+                pdf.set_fill_color(225, 228, 235)
+                pdf.rect(bar_x_start, bar_y, bar_width, BAR_H, "F")
+                # Füllung
+                fill_w = max(0.5, min(bar_width, bar_width * pct))
+                pdf.set_fill_color(*CLR_PRIMARY)
+                pdf.rect(bar_x_start, bar_y, fill_w, BAR_H, "F")
                 reset_color()
 
-            # Spalten 1–3: Text (Stunde, g/h, Menge)
-            pdf.set_xy(LM, row_y)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.cell(widths[0], ROW_H, _s(stunde_lbl), align="C",
-                     new_x=XPos.RIGHT, new_y=YPos.TOP)
-            pdf.cell(widths[1], ROW_H, _s(f"{s['carbs_g_h']} g"), align="C",
-                     new_x=XPos.RIGHT, new_y=YPos.TOP)
-            pdf.cell(widths[2], ROW_H, _s(f"{s['carbs_g']} g"), align="C",
-                     new_x=XPos.RIGHT, new_y=YPos.TOP)
+                # Spalte 5: Prozent-Text
+                pdf.set_xy(LM + widths[0] + widths[1] + widths[2] + widths[3], row_y)
+                pdf.set_font("Helvetica", "", 8.5)
+                pdf.cell(widths[4], ROW_H, _s(f"{int(round(pct * 100))}%"),
+                         align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-            # Spalte 4: Progress-Bar (manuell mit korrekter X/Y-Position zeichnen)
-            pct = s["carbs_g_h"] / max_rate
-            bar_x_start = LM + widths[0] + widths[1] + widths[2] + BAR_PAD
-            bar_width = widths[3] - 2 * BAR_PAD
-            bar_y = row_y + (ROW_H - BAR_H) / 2
-            # Hintergrund (hellgrau)
-            pdf.set_fill_color(225, 228, 235)
-            pdf.rect(bar_x_start, bar_y, bar_width, BAR_H, "F")
-            # Füllung
-            fill_w = max(0.5, min(bar_width, bar_width * pct))
-            pdf.set_fill_color(*CLR_PRIMARY)
-            pdf.rect(bar_x_start, bar_y, fill_w, BAR_H, "F")
-            reset_color()
-
-            # Spalte 5: Prozent-Text
-            pdf.set_xy(LM + widths[0] + widths[1] + widths[2] + widths[3], row_y)
-            pdf.set_font("Helvetica", "", 8.5)
-            pdf.cell(widths[4], ROW_H, _s(f"{int(round(pct * 100))}%"),
-                     align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-            # Untere Zeilen-Trennlinie
-            pdf.set_draw_color(*CLR_BORDER)
-            pdf.set_line_width(0.15)
-            pdf.line(LM, row_y + ROW_H, LM + W, row_y + ROW_H)
+                # Untere Zeilen-Trennlinie
+                pdf.set_draw_color(*CLR_BORDER)
+                pdf.set_line_width(0.15)
+                pdf.line(LM, row_y + ROW_H, LM + W, row_y + ROW_H)
+        finally:
+            # Auto-Page-Break wieder aktivieren
+            pdf.set_auto_page_break(auto=True, margin=18)
 
         # Summe
         pdf.ln(1)
@@ -2350,16 +2376,6 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
              f"Gewichteter Schnitt: {e['carbs']['pro_h']} g/h",
              italic=True, indent=2)
 
-    # ════════════════════════════════════════════════════════════════════
-    # GPX-ROUTE
-    # ════════════════════════════════════════════════════════════════════
-    if gpx_data:
-        section_main("GPX-Route")
-        kv("Streckenname", gpx_data.get("name", "-"))
-        kv("Distanz", f"{gpx_data.get('distanz_km', 0):.1f} km")
-        kv("Hoehenmeter (aufwaerts)", f"{int(gpx_data.get('hoehenmeter_auf', 0))} m")
-        kv("Hoehenmeter (abwaerts)", f"{int(gpx_data.get('hoehenmeter_ab', 0))} m")
-        kv("Anzahl Trackpunkte", f"{len(gpx_data.get('points', []))}")
 
     # ════════════════════════════════════════════════════════════════════
     # RESUPPLY-STOPPS
@@ -2434,7 +2450,7 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
     pdf.set_x(LM)
     pdf.cell(W, 4,
              _s(f"Erstellt mit Cycling Fueling Planner  -  "
-                f"{datetime.now().strftime('%d.%m.%Y %H:%M')}"),
+                f"{jetzt_local().strftime('%d.%m.%Y %H:%M')}"),
              new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
     pdf.set_x(LM)
     pdf.cell(W, 4,
@@ -4696,7 +4712,7 @@ genauer als die Pauschalrechnung.
         st.download_button(
             label="📥 Plan als .txt herunterladen",
             data=plan_text,
-            file_name=f"fueling_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            file_name=f"fueling_plan_{jetzt_local().strftime('%Y%m%d_%H%M')}.txt",
             mime="text/plain",
             use_container_width=True,
         )
@@ -4705,7 +4721,7 @@ genauer als die Pauschalrechnung.
             st.download_button(
                 label="📄 Plan als PDF herunterladen",
                 data=pdf_bytes,
-                file_name=f"fueling_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                file_name=f"fueling_plan_{jetzt_local().strftime('%Y%m%d_%H%M')}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
