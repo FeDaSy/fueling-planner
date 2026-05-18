@@ -2509,41 +2509,81 @@ if "intervalle" not in st.session_state:
 # Dashboard: https://fueling-planner.goatcounter.com
 # - Keine Cookies, kein User-Tracking, DSGVO-konform ohne Banner
 # - Hit wird nur einmal pro Streamlit-Session gezählt (nicht bei jedem Rerun)
-# - Lokale Entwicklung (localhost) wird ausgeschlossen
-GOATCOUNTER_ENDPOINT = "https://fueling-planner.goatcounter.com/count"
+# - Nutzt offizielle count.js mit Pixel-Fallback für robuste Erfassung
+GOATCOUNTER_CODE = "fueling-planner"
+GOATCOUNTER_ENDPOINT = f"https://{GOATCOUNTER_CODE}.goatcounter.com/count"
 if "_gc_tracked" not in st.session_state:
     st.session_state._gc_tracked = True
     try:
         import streamlit.components.v1 as _gc_components
         _gc_components.html(
             f"""
+            <!DOCTYPE html>
+            <html>
+            <head><meta charset="utf-8"></head>
+            <body>
             <script>
+            // Statischer Pfad/Titel (Iframe sieht die Eltern-URL nicht zuverlässig)
+            window.goatcounter = {{
+                endpoint: '{GOATCOUNTER_ENDPOINT}',
+                no_onload: true,        // wir feuern den Hit selbst (kontrollierter)
+                allow_local: true,      // erlaubt Hits auch von streamlit.app
+                path:  function() {{ return 'cycling-fueling-planner'; }},
+                title: function() {{ return 'Cycling Fueling Planner'; }},
+                referrer: function() {{ return document.referrer || ''; }}
+            }};
+            console.log('[GC] config set, loading count.js...');
+            </script>
+            <script async src="//gc.zgo.at/count.js"
+                    onload="console.log('[GC] count.js loaded')"
+                    onerror="console.warn('[GC] count.js failed to load')"></script>
+            <script>
+            // Manuell auslösen sobald count.js geladen ist, mit Fallback-Pixel
             (function() {{
-                try {{
-                    // Nur auf produzierter Domain tracken (nicht localhost / 127.0.0.1)
-                    var host = '';
-                    try {{ host = window.parent.location.hostname; }} catch(e) {{ host = window.location.hostname; }}
-                    if (host.indexOf('localhost') !== -1 || host.indexOf('127.0.0.1') !== -1) {{
-                        return;  // Skip tracking in local dev
+                var gcFired = false;
+                var fireGC = function() {{
+                    if (gcFired) return;
+                    if (window.goatcounter && window.goatcounter.count) {{
+                        try {{
+                            window.goatcounter.count({{
+                                path: 'cycling-fueling-planner',
+                                title: 'Cycling Fueling Planner'
+                            }});
+                            gcFired = true;
+                            console.log('[GC] hit fired via count.js');
+                            return true;
+                        }} catch (e) {{
+                            console.warn('[GC] count.js call failed', e);
+                        }}
                     }}
-                    // Pfad & Titel manuell setzen (Iframe-URL ist nicht aussagekräftig)
-                    var parentPath = '/';
-                    try {{ parentPath = window.parent.location.pathname || '/'; }} catch(e) {{}}
-                    var parentRef = '';
-                    try {{ parentRef = window.parent.document.referrer || ''; }} catch(e) {{}}
-                    var img = new Image();
-                    img.src = '{GOATCOUNTER_ENDPOINT}'
-                        + '?p=' + encodeURIComponent(parentPath)
-                        + '&t=' + encodeURIComponent('Cycling Fueling Planner')
-                        + '&r=' + encodeURIComponent(parentRef)
-                        + '&rnd=' + Math.random();  // Cache-Busting
-                }} catch (err) {{
-                    // Tracking-Fehler ignorieren – darf die App nie blockieren
-                }}
+                    return false;
+                }};
+                // Versuche alle 200ms bis zu 10x (= 2 Sek.)
+                var tries = 0;
+                var iv = setInterval(function() {{
+                    tries++;
+                    if (fireGC() || tries >= 10) {{
+                        clearInterval(iv);
+                        // Fallback: simples Pixel, falls count.js blockiert wurde
+                        if (!gcFired) {{
+                            console.log('[GC] count.js unavailable, using pixel fallback');
+                            var img = new Image();
+                            img.onload  = function() {{ console.log('[GC] pixel OK'); }};
+                            img.onerror = function() {{ console.warn('[GC] pixel blocked (Adblocker?)'); }};
+                            img.src = '{GOATCOUNTER_ENDPOINT}'
+                                + '?p=' + encodeURIComponent('cycling-fueling-planner')
+                                + '&t=' + encodeURIComponent('Cycling Fueling Planner')
+                                + '&r=' + encodeURIComponent(document.referrer || '')
+                                + '&rnd=' + Math.random();
+                        }}
+                    }}
+                }}, 200);
             }})();
             </script>
+            </body>
+            </html>
             """,
-            height=0, width=0,
+            height=0,
         )
     except Exception:
         pass  # Sollte das Component fehlen: App läuft trotzdem weiter
