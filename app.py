@@ -1686,6 +1686,51 @@ if "intensitaet_modus" not in st.session_state:
 if "intervalle" not in st.session_state:
     st.session_state.intervalle = [{"zone": "Z2", "watt": None, "hf": None, "dauer_min": 60}]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ANALYTICS: GoatCounter (privacy-friendly, cookieless, einmal pro Session)
+# ══════════════════════════════════════════════════════════════════════════════
+# Dashboard: https://fueling-planner.goatcounter.com
+# - Keine Cookies, kein User-Tracking, DSGVO-konform ohne Banner
+# - Hit wird nur einmal pro Streamlit-Session gezählt (nicht bei jedem Rerun)
+# - Lokale Entwicklung (localhost) wird ausgeschlossen
+GOATCOUNTER_ENDPOINT = "https://fueling-planner.goatcounter.com/count"
+if "_gc_tracked" not in st.session_state:
+    st.session_state._gc_tracked = True
+    try:
+        import streamlit.components.v1 as _gc_components
+        _gc_components.html(
+            f"""
+            <script>
+            (function() {{
+                try {{
+                    // Nur auf produzierter Domain tracken (nicht localhost / 127.0.0.1)
+                    var host = '';
+                    try {{ host = window.parent.location.hostname; }} catch(e) {{ host = window.location.hostname; }}
+                    if (host.indexOf('localhost') !== -1 || host.indexOf('127.0.0.1') !== -1) {{
+                        return;  // Skip tracking in local dev
+                    }}
+                    // Pfad & Titel manuell setzen (Iframe-URL ist nicht aussagekräftig)
+                    var parentPath = '/';
+                    try {{ parentPath = window.parent.location.pathname || '/'; }} catch(e) {{}}
+                    var parentRef = '';
+                    try {{ parentRef = window.parent.document.referrer || ''; }} catch(e) {{}}
+                    var img = new Image();
+                    img.src = '{GOATCOUNTER_ENDPOINT}'
+                        + '?p=' + encodeURIComponent(parentPath)
+                        + '&t=' + encodeURIComponent('Cycling Fueling Planner')
+                        + '&r=' + encodeURIComponent(parentRef)
+                        + '&rnd=' + Math.random();  // Cache-Busting
+                }} catch (err) {{
+                    // Tracking-Fehler ignorieren – darf die App nie blockieren
+                }}
+            }})();
+            </script>
+            """,
+            height=0, width=0,
+        )
+    except Exception:
+        pass  # Sollte das Component fehlen: App läuft trotzdem weiter
+
 profil = st.session_state.profil
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2178,6 +2223,13 @@ Kopie oder Modifikation des Codes dar.
 Die Software wird "wie besehen" (AS IS) bereitgestellt, ohne Garantie jeglicher Art.
 Die berechneten Ernährungs- und Trinkempfehlungen ersetzen keine professionelle
 sportmedizinische Beratung.
+
+**DATENSCHUTZ & ANALYSE**
+Diese App nutzt **GoatCounter** für anonyme Aufrufstatistiken — **keine Cookies,
+keine IP-Speicherung, keine personenbezogenen Daten**. Erfasst werden ausschließlich
+aggregierte Werte (Seitenaufrufe, Browser, Land). Das Profil wird lokal im
+Browser-Speicher (`localStorage`) gespeichert und verlässt das Gerät nicht.
+Mehr Infos: [goatcounter.com/help/gdpr](https://www.goatcounter.com/help/gdpr).
 
 **Geltendes Recht:** Deutsches Recht (UrhG) und EU-Urheberrecht.
 

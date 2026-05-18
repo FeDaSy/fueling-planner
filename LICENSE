@@ -49,12 +49,25 @@ NUTZUNGSBEDINGUNGEN (DEUTSCH)
    Die berechneten Ernährungs- und Trinkempfehlungen ersetzen keine
    professionelle sportmedizinische Beratung.
 
-5. GELTENDES RECHT
+5. DATENSCHUTZ & ANALYSE
+   Die App nutzt GoatCounter (https://goatcounter.com) für anonyme,
+   aggregierte Aufrufstatistiken. Es werden KEINE Cookies gesetzt,
+   KEINE IP-Adressen gespeichert und KEINE personenbezogenen Daten
+   erfasst. Erfasst werden ausschließlich Seitenaufrufe, Browser-Typ
+   und das Herkunftsland (auf Basis aggregierter, anonymer Hashes).
+   Die GoatCounter-DSGVO-Erklärung findet sich unter
+   https://www.goatcounter.com/help/gdpr
+
+   Profileinstellungen (FTP, Gewicht, Schweißtyp etc.) werden
+   ausschließlich im lokalen Browser-Speicher (localStorage) abgelegt
+   und verlassen das Gerät des Nutzers nicht.
+
+6. GELTENDES RECHT
    Diese Vereinbarung unterliegt dem deutschen Recht. Urheberrechtliche
    Ansprüche richten sich nach dem Urheberrechtsgesetz (UrhG) der
    Bundesrepublik Deutschland sowie dem EU-Urheberrecht.
 
-6. KONTAKT & LIZENZIERUNG
+7. KONTAKT & LIZENZIERUNG
    Anfragen zur kommerziellen Nutzung, Kooperation oder alternativen
    Lizenzierung bitte per GitHub-Issue:
    https://github.com/FeDaSy/fueling-planner/issues
