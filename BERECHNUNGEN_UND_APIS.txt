@@ -549,19 +549,123 @@ Das garantiert, dass der Fahrer nie völlig leer wird.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-  4. KOFFEIN
+  4. KOFFEIN (körpergewicht- & dauerbasiert)
 ────────────────────────────────────────────────────────────────────────────────
 
-Koffein verbessert nachweislich die Ausdauerleistung, insbesondere ab
-Stunde 2–3. Das Skript plant den Einsatz nach Dauer:
+4a) Wissenschaftliche Grundlage
+─────────────────────────────────
+Koffein verbessert nachweislich die Ausdauerleistung über mehrere
+Mechanismen: Reduktion der wahrgenommenen Anstrengung (RPE), Adenosin-
+Antagonismus, verbesserte Muskelfasererregbarkeit.
 
-    Dauer < 2h:     kein Koffein (nicht nötig)
-    2–4h:           1 Cap nach Stunde 2
-    4–6h:           2 Caps (Stunde 2 und 4)
-    6–8h:           4 Caps (Stunden 1, 4, 6, 8)
-    > 8h:           5 Caps (Stunden 1, 4, 7, 9 doppelt, 11)
+Aktueller Konsens:
+  - ISSN Position Stand on Caffeine (2021):
+    Optimale Dosis 3–6 mg/kg. 3 mg/kg liefert ~95 % des Benefits
+    von 6 mg/kg mit deutlich weniger Nebenwirkungen.
+  - IOC Consensus on Sports Nutrition (2010):
+    3 mg/kg empfohlen, Aufteilung in mehrere kleine Dosen möglich
+    und bei langen Belastungen vorteilhaft.
+  - Halbwertszeit ~5 h (variabel 3–10 h je nach CYP1A2-Genotyp)
+    → bei Belastungen > 5 h sinnvoll, mehrere Dosen einzuplanen.
+  - EFSA-Sicherheit: Einzeldosis ≤ 200 mg, Tagesgrenze 400 mg
+    für gesunde Erwachsene.
 
-Die Menge pro Cap ist im Profil konfigurierbar (Standard: 50 mg).
+
+4b) Dosierungsstrategie im Skript
+───────────────────────────────────
+Das Skript berechnet die Gesamtdosis individuell aus Körpergewicht
+und Dauer:
+
+  INITIAL-DOSIS (zum Start, ~30 min vor Belastung):
+      initial_mg = 3 mg/kg × Körpergewicht
+      → 75 kg: 225 mg
+      → 60 kg: 180 mg
+
+  ERHALTUNGSDOSEN (alle 2 h ab Stunde 2):
+      maintenance_mg = 1,5 mg/kg × Körpergewicht (pro Dosis)
+      Anzahl = floor((dauer_h − 1) / 2)
+
+  GESAMTDOSIS:
+      total_mg = initial_mg + n_maintenance × maintenance_mg
+
+  SICHERHEITS-CAPS:
+      cap_acute = 6 mg/kg × Körpergewicht  (Performance-Plateau,
+                                             höhere Dosen ohne
+                                             zusätzlichen Nutzen)
+      cap_efsa  = 400 mg                    (EFSA-Tagesgrenze)
+      total_mg = min(total_mg, cap_acute, cap_efsa)
+
+  ANZAHL KAPSELN:
+      caps = round(total_mg / mg_pro_cap)
+      Die Anzahl wird auf die Stückzahl im Profil umgerechnet.
+
+
+4c) Beispielrechnungen (75 kg Sportler/in, 50-mg-Kapseln)
+───────────────────────────────────────────────────────────
+
+  Dauer    Initial   Erhaltung    Roh-Ziel    Capped     Caps
+  ───────────────────────────────────────────────────────────────
+  < 1,5 h  —         —            —           0          0
+  2 h      225 mg    0 × 112 mg   225 mg      —          5
+  4 h      225 mg    1 × 112 mg   337 mg      —          7
+  6 h      225 mg    2 × 112 mg   450 mg      → 400 mg   8
+  8 h      225 mg    3 × 112 mg   562 mg      → 400 mg   8
+  10 h     225 mg    4 × 112 mg   675 mg      → 400 mg   8
+  12 h+    225 mg    5+ × 112 mg  > 800 mg    → 400 mg   8
+
+Bei sehr leichten Sportler/innen (z. B. 55 kg):
+  - 6 mg/kg-Cap = 330 mg → Cap greift früher
+  - Total über alle Stunden niedriger
+
+Bei schweren Sportler/innen (z. B. 90 kg):
+  - 6 mg/kg-Cap = 540 mg → EFSA 400 mg greift
+  - Effektive Dosis bleibt bei 400 mg
+
+
+4d) Timing-Verteilung
+───────────────────────
+Die berechneten Kapseln werden zeitlich verteilt:
+
+  - Initial-Caps: zum Start (~30 min davor)
+  - Erhaltungs-Caps: gleichmäßig zwischen Stunde 2 und (dauer − 0,5 h)
+    verteilt
+  - Mindestens 0,5 h Puffer zum Ende, damit Koffein nicht direkt vor
+    Schlafenszeit-relevantem Zeitpunkt zugeführt wird
+
+Beispiel 6 h Belastung, 75 kg, 50-mg-Caps (8 Caps total):
+  - Start: 5 Caps (250 mg)
+  - h2.0: 1 Cap
+  - h3.7: 1 Cap
+  - h5.5: 1 Cap
+
+
+4e) Was sich gegenüber der alten Version geändert hat
+───────────────────────────────────────────────────────
+Frühere Versionen verwendeten eine statische Tabelle:
+  2–4h: 1 Cap, 4–6h: 2 Caps, 6–8h: 4 Caps, > 8h: 5 Caps
+
+Probleme:
+  - Ignorierte Körpergewicht (60 kg vs. 90 kg gleicher Plan)
+  - Fixe Stundenangaben (Stunde 1, 4, 7, 9 Doppel, 11) waren auch
+    bei 20-h-Events identisch
+  - Keine Berücksichtigung der mg/kg-Empfehlungen aus der Literatur
+  - Cap-Mengen schienen willkürlich
+
+Die neue Logik ist:
+  - Körpergewichts-skaliert (3 mg/kg + 1,5 mg/kg pro 2 h)
+  - Dauer-skaliert (mehr Stunden → mehr Erhaltungsdosen)
+  - Sicherheitslimitiert (EFSA + Performance-Plateau)
+  - Transparent (Roh-Ziel und Cap-Grund werden angezeigt)
+
+
+Hinweise:
+  - Der genetische CYP1A2-Stoffwechseltyp (schneller vs. langsamer
+    Metabolisierer) wird nicht abgefragt; Standardannahme ist
+    durchschnittliche Empfindlichkeit.
+  - Bei nachgewiesener Koffein-Empfindlichkeit: Dosis manuell halbieren
+    (z. B. Profil-Wert für mg/Cap reduzieren).
+  - Bei Eventbeginn am Abend / vor Schlafenszeit: nur Initial-Dosis,
+    Erhaltungsdosen weglassen.
 
 
 ────────────────────────────────────────────────────────────────────────────────

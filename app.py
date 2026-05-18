@@ -543,14 +543,105 @@ def berechne_gel_rezept(profil, carbs_pro_flask, temp, carbs_pro_h=None, volumen
     return {"maltodextrin": malto, "fructose": fructose, "salz": salz, "wasser": max(0, wasser)}
 
 def berechne_koffein(profil, dauer_h):
+    """
+    Dynamische, körpergewichts- und dauerbasierte Koffeinplanung.
+
+    Wissenschaftliche Grundlage:
+    - ISSN Position Stand on Caffeine (2021): 3–6 mg/kg optimal,
+      3 mg/kg liefert ~95% des Benefits von 6 mg/kg mit weniger NW
+    - IOC Consensus (2010): Aufteilung Initial + Erhaltung möglich
+    - Burke / Hawley / Jeukendrup: 1,5 mg/kg alle ~2h als Maintenance
+    - EFSA: Einzeldosis ≤ 200 mg, Tagesgrenze 400 mg
+    - Halbwertszeit: ~5 h (CYP1A2-Genotyp-abhängig 3–10 h)
+
+    Strategie:
+      Initial-Dosis  : 3 mg/kg zum Start (~30 min vor Belastung)
+      Erhaltungsdosen: 1,5 mg/kg alle 2 h ab Stunde 2
+      Cap (gesamt)   : 6 mg/kg ODER 400 mg (EFSA), je nachdem was niedriger ist
+      Letzte Dosis   : spätestens (dauer - 0,5 h), damit nicht zu nah am Ende
+    """
+    default_return = {
+        "caps": 0, "plan": "Koffein deaktiviert",
+        "gesamt_mg": 0, "mg_pro_kg": 0.0,
+        "timings": [], "cap_grund": None,
+    }
     if not profil["koffein"]["aktiv"]:
-        return {"caps": 0, "plan": "Koffein deaktiviert"}
-    mg = profil["koffein"]["pro_cap_mg"]
-    if dauer_h < 2:   return {"caps": 0, "plan": "Nicht nötig (< 2 h)"}
-    elif dauer_h < 4: return {"caps": 1, "plan": f"1 Cap ({mg} mg) nach Stunde 2"}
-    elif dauer_h < 6: return {"caps": 2, "plan": f"Stunde 2 und 4 (je {mg} mg)"}
-    elif dauer_h < 8: return {"caps": 4, "plan": f"Stunde 1, 4, 6, 8 (je {mg} mg)"}
-    else:             return {"caps": 5, "plan": f"Stunde 1, 4, 7, 9 (Doppel), 11"}
+        return default_return
+
+    mg_pro_cap = profil["koffein"]["pro_cap_mg"]
+    gewicht_kg = profil.get("koerpergewicht_kg", 75)
+
+    if dauer_h < 1.5:
+        return {**default_return,
+                "plan": "Nicht nötig bei < 1,5 h Belastung (kein nennenswerter Performance-Effekt)"}
+
+    # Ziel-Dosen
+    initial_mg_target = 3.0 * gewicht_kg          # 3 mg/kg pre/Start
+    maintenance_mg_per_dose = 1.5 * gewicht_kg    # 1,5 mg/kg pro Erhaltungsdosis
+
+    # Anzahl Erhaltungsdosen (alle 2 h ab Stunde 2, letzte spätestens dauer-0,5)
+    if dauer_h <= 2:
+        n_maintenance = 0
+    else:
+        n_maintenance = max(0, math.floor((dauer_h - 1) / 2.0))
+
+    total_target_mg = initial_mg_target + n_maintenance * maintenance_mg_per_dose
+
+    # Sicherheitsobergrenzen
+    max_acute_mg = 6.0 * gewicht_kg
+    max_efsa_mg = 400.0
+    cap_grund = None
+    if total_target_mg > max_acute_mg:
+        total_target_mg = max_acute_mg
+        cap_grund = f"6 mg/kg Sicherheitsobergrenze ({max_acute_mg:.0f} mg)"
+    if total_target_mg > max_efsa_mg:
+        total_target_mg = max_efsa_mg
+        cap_grund = "EFSA-Tagesgrenze (400 mg)"
+
+    # In Kapseln umrechnen (immer min. 1 Cap)
+    total_caps = max(1, round(total_target_mg / mg_pro_cap))
+    actual_mg = total_caps * mg_pro_cap
+
+    # Timing: Initial-Dosis + verteilte Erhaltungsdosen
+    # Wenn die Gesamtdosis gedeckelt wurde, Initial proportional reduzieren,
+    # damit lange Events nicht front-loaded werden.
+    roh_total_mg = initial_mg_target + n_maintenance * maintenance_mg_per_dose
+    if cap_grund and roh_total_mg > 0:
+        scale = actual_mg / roh_total_mg
+        initial_mg_planned = initial_mg_target * scale
+    else:
+        initial_mg_planned = initial_mg_target
+
+    initial_caps_target = max(1, round(initial_mg_planned / mg_pro_cap))
+    initial_caps = min(initial_caps_target, total_caps)
+    remaining_caps = total_caps - initial_caps
+
+    timings = [{"zeit_h": 0.0, "caps": initial_caps,
+                "label": f"Start (~30 min vor Belastung): {initial_caps} Cap" +
+                         ("s" if initial_caps != 1 else "")}]
+
+    if remaining_caps > 0 and dauer_h > 2:
+        # Verteile gleichmäßig zwischen Stunde 2 und (dauer - 0,5)
+        end_dose_at = max(2.0, dauer_h - 0.5)
+        if remaining_caps == 1:
+            t = round((2.0 + end_dose_at) / 2.0, 1)
+            timings.append({"zeit_h": t, "caps": 1, "label": f"h{t:.1f}: 1 Cap"})
+        else:
+            for i in range(remaining_caps):
+                t = 2.0 + (end_dose_at - 2.0) * i / max(1, remaining_caps - 1)
+                t = round(t, 1)
+                timings.append({"zeit_h": t, "caps": 1, "label": f"h{t:.1f}: 1 Cap"})
+
+    plan_str = " | ".join(t["label"] for t in timings)
+
+    return {
+        "caps": total_caps,
+        "gesamt_mg": int(round(actual_mg)),
+        "mg_pro_kg": round(actual_mg / gewicht_kg, 2),
+        "plan": plan_str,
+        "timings": timings,
+        "cap_grund": cap_grund,
+    }
 
 def berechne_riegel_plan(profil, carbs_aus_riegeln, dauer_h, zone):
     aktive = [r for r in profil["riegel"] if r["aktiv"] and r.get("anzahl", 0) > 0]
@@ -1143,10 +1234,19 @@ def erstelle_plan_text(e, wetter_info=None, wetter_punkte=None, resupply_stopps=
         f"Menge         : {el['portion_g']} g x {el['fuellungen']}  =  {el['gesamt_g']} g",
         "",
         "--- KOFFEIN ---",
-        f"Plan          : {e['koffein']['plan']}",
     ]
-    if e["koffein"]["caps"]:
-        lines.append(f"Kapseln       : {e['koffein']['caps']} Stk.")
+    _ko = e["koffein"]
+    if _ko["caps"]:
+        lines.append(f"Kapseln       : {_ko['caps']} Stk.  "
+                     f"({_ko.get('gesamt_mg', 0)} mg gesamt, "
+                     f"{_ko.get('mg_pro_kg', 0)} mg/kg)")
+        lines.append("Plan          :")
+        for t in _ko.get("timings", []):
+            lines.append(f"  - {t['label']}")
+        if _ko.get("cap_grund"):
+            lines.append(f"Hinweis       : Dosis gedeckelt – {_ko['cap_grund']}")
+    else:
+        lines.append(f"Plan          : {_ko['plan']}")
     lines.append("")
 
     mix_iv = e.get("mix_intervalle")
@@ -1388,9 +1488,14 @@ def erstelle_plan_pdf(e, wetter_info=None, wetter_punkte=None, resupply_stopps=N
 
     section("Koffein")
     ko = e["koffein"]
-    kv("Plan", ko["plan"])
     if ko["caps"]:
-        kv("Kapseln", f"{ko['caps']} Stk.")
+        kv("Kapseln", f"{ko['caps']} Stk. "
+                       f"({ko.get('gesamt_mg', 0)} mg, {ko.get('mg_pro_kg', 0)} mg/kg)")
+        kv("Plan", ko["plan"])
+        if ko.get("cap_grund"):
+            kv("Hinweis", f"Dosis gedeckelt – {ko['cap_grund']}")
+    else:
+        kv("Plan", ko["plan"])
 
     # ── Mix-Intervalle ─────────────────────────────────────────────────────────
     mix_iv = e.get("mix_intervalle")
@@ -1596,17 +1701,21 @@ with st.sidebar:
         ),
     )
 
-    # ── Körpergewicht & Trainingsstatus (für Glykogen-Bilanz) ──
+    # ── Körpergewicht & Trainingsstatus (für Glykogen-Bilanz & Koffein) ──
     cols_kg = st.columns(2)
     profil["koerpergewicht_kg"] = cols_kg[0].number_input(
         "Körpergewicht (kg)",
         min_value=40, max_value=150,
         value=int(profil.get("koerpergewicht_kg", 75)), step=1,
         help=(
-            "Dein Körpergewicht in kg. Wird für die Glykogen-Speicherbilanz benötigt: "
-            "pro kg Körpergewicht speicherst du je nach Trainingsstatus 6–13 g Kohlenhydrate "
-            "als Glykogen (Muskel + Leber). Hat KEINEN Einfluss auf Schweißrate oder "
-            "Kohlenhydratbedarf in der bestehenden Berechnung."
+            "Dein Körpergewicht in kg. Wird verwendet für:\n\n"
+            "• **Glykogen-Speicherbilanz**: 6–13 g Glykogen pro kg, "
+            "je nach Trainingsstatus (Muskel + Leber)\n\n"
+            "• **Koffein-Plan**: körpergewichtsbasierte Dosierung "
+            "nach ISSN-Empfehlung (3 mg/kg Initial-Dosis + "
+            "1,5 mg/kg Erhaltung alle 2 h)\n\n"
+            "Hat KEINEN Einfluss auf Schweißrate oder Kohlenhydratbedarf "
+            "(die werden über FTP/Zone bzw. Schweißtyp individuell skaliert)."
         ),
     )
     trainings_optionen = {
@@ -3016,9 +3125,24 @@ genauer als die Pauschalrechnung.
     with st.expander("☕ Koffein-Plan", expanded=False):
         koff = e["koffein"]
         if koff["caps"] > 0:
-            cols = st.columns(2)
+            cols = st.columns(3)
             cols[0].metric("Kapseln gesamt", koff["caps"])
-            cols[1].info(koff["plan"])
+            cols[1].metric("Gesamt-Koffein", f"{koff['gesamt_mg']} mg",
+                           help="Summe über alle Kapseln")
+            cols[2].metric("mg pro kg KG", f"{koff['mg_pro_kg']:.1f}",
+                           help=f"Bezogen auf {profil.get('koerpergewicht_kg', 75)} kg. "
+                                "Ziel-Bereich: 3–6 mg/kg laut ISSN.")
+            if koff.get("cap_grund"):
+                st.warning(f"⚠️ Dosis auf {koff['gesamt_mg']} mg gedeckelt — "
+                           f"Grund: {koff['cap_grund']}")
+            st.markdown("**Einnahme-Plan:**")
+            for t in koff.get("timings", []):
+                st.markdown(f"- {t['label']}")
+            st.caption(
+                "Wissenschaftliche Grundlage: 3 mg/kg Initial-Dosis (≈ 95 % des "
+                "Benefits von 6 mg/kg, ISSN 2021) + 1,5 mg/kg Erhaltung alle 2 h. "
+                "Sicherheitscap: 6 mg/kg pro Event ODER 400 mg (EFSA-Tagesgrenze)."
+            )
         else:
             st.info(koff["plan"])
 
@@ -3417,16 +3541,42 @@ genauer als die Pauschalrechnung.
         # 7. KOFFEIN
         # ───────────────────────────────────────────
         koff = e.get("koffein", {})
-        if koff and koff.get("kapseln", 0) > 0:
-            st.markdown("### 7. Koffein-Plan")
+        if koff and koff.get("caps", 0) > 0:
+            st.markdown("### 7. Koffein-Plan (körpergewicht- & dauerbasiert)")
+            gw = profil.get("koerpergewicht_kg", 75)
+            mg_cap = profil["koffein"]["pro_cap_mg"]
+            initial_target = 3.0 * gw
+            maint_per = 1.5 * gw
+            if e["dauer_h"] <= 2:
+                n_maint = 0
+            else:
+                n_maint = max(0, math.floor((e["dauer_h"] - 1) / 2.0))
+            roh_target = initial_target + n_maint * maint_per
             st.markdown(
-                f"**Logik:** Dauer ≥ 2 h → 1 Cap nach Stunde 2 · "
-                f"≥ 4 h → 2 Caps · ≥ 6 h → 4 Caps · > 8 h → 5 Caps  \n"
-                f"**Dauer {e['dauer_h']} h:** {koff.get('kapseln', 0)} Kapseln  \n"
-                f"**Plan:** {koff.get('plan', '—')}  \n"
-                f"**Menge pro Cap:** {profil.get('koffein_pro_cap_mg', 50)} mg "
-                f"= **{koff.get('gesamt_mg', 0)} mg** gesamt"
+                f"**Wissenschaftliche Strategie:**  \n"
+                f"- Initial-Dosis: 3 mg/kg (ISSN 2021)  \n"
+                f"- Erhaltungsdosen: 1,5 mg/kg alle 2 h ab Stunde 2  \n"
+                f"- Sicherheitsobergrenze: 6 mg/kg ODER 400 mg (EFSA)\n\n"
+                f"**Deine Werte** ({gw} kg, {e['dauer_h']} h, "
+                f"{mg_cap} mg/Cap):\n\n"
+                f"`Initial = 3 × {gw} = {initial_target:.0f} mg`  \n"
+                f"`Erhaltung = {n_maint} × 1,5 × {gw} = "
+                f"{n_maint * maint_per:.0f} mg`  \n"
+                f"`Roh-Ziel = {roh_target:.0f} mg`"
             )
+            if koff.get("cap_grund"):
+                st.markdown(
+                    f"⚠️ **Gedeckelt auf {koff['gesamt_mg']} mg** — "
+                    f"Grund: {koff['cap_grund']}"
+                )
+            st.markdown(
+                f"**Endergebnis:** {koff['caps']} Kapseln × {mg_cap} mg "
+                f"= **{koff['gesamt_mg']} mg** "
+                f"(**{koff['mg_pro_kg']:.2f} mg/kg**)"
+            )
+            st.markdown("**Einnahme-Plan:**")
+            for t in koff.get("timings", []):
+                st.markdown(f"- {t['label']}")
 
         # ───────────────────────────────────────────
         # 8. VERTEILUNG GELS vs. RIEGEL
