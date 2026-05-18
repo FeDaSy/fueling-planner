@@ -30,6 +30,31 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
+# ── Optional: Browser-localStorage für persistente Profile ────────────────────
+try:
+    from streamlit_local_storage import LocalStorage
+    _LOCAL_STORAGE_OK = True
+except ImportError:
+    LocalStorage = None  # type: ignore
+    _LOCAL_STORAGE_OK = False
+
+
+def _merge_profil_mit_defaults(geladen, defaults):
+    """
+    Mergt ein geladenes Profil rekursiv mit den Defaults.
+    So bleibt das Profil kompatibel, wenn neue Felder hinzugekommen sind.
+    """
+    if not isinstance(geladen, dict) or not isinstance(defaults, dict):
+        return geladen if geladen is not None else defaults
+    result = copy.deepcopy(defaults)
+    for k, v in geladen.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _merge_profil_mit_defaults(v, result[k])
+        else:
+            result[k] = v
+    return result
+
+
 # ── Konstanten ────────────────────────────────────────────────────────────────
 CARBS_PRO_STUNDE = {"Z1": 30, "Z2": 60, "Z3": 75, "Z4": 90, "Z5": 90, "Mix": 70}
 
@@ -1618,6 +1643,34 @@ st.set_page_config(page_title="Cycling Fueling Planner", page_icon="🚴", layou
 # Session-State initialisieren
 if "profil" not in st.session_state:
     st.session_state.profil = copy.deepcopy(DEFAULT_PROFIL)
+
+# ── localStorage: Profil beim ersten Aufruf aus Browser laden ──
+# Hinweis: getItem() liefert beim ersten Aufruf evtl. None (Component muss erst
+# laden); nach einem Rerun ist der Wert verfügbar. Wir versuchen daher mehrfach.
+_PROFIL_STORAGE_KEY = "fueling_planner_profil_v1"
+_localS = LocalStorage() if _LOCAL_STORAGE_OK else None
+if _localS is not None and not st.session_state.get("_profil_storage_geladen"):
+    try:
+        gespeichert = _localS.getItem(_PROFIL_STORAGE_KEY)
+        if gespeichert:
+            try:
+                profil_geladen = json.loads(gespeichert)
+                st.session_state.profil = _merge_profil_mit_defaults(
+                    profil_geladen, DEFAULT_PROFIL
+                )
+                st.session_state._profil_storage_geladen = True
+            except (json.JSONDecodeError, TypeError):
+                # Korrupte Daten — als geladen markieren, damit nichts überschrieben wird
+                st.session_state._profil_storage_geladen = True
+        else:
+            # Noch nichts geladen oder leer — bis zu 3 Versuche zulassen
+            attempts = st.session_state.get("_profil_storage_versuche", 0) + 1
+            st.session_state._profil_storage_versuche = attempts
+            if attempts >= 3:
+                st.session_state._profil_storage_geladen = True
+    except Exception:
+        st.session_state._profil_storage_geladen = True  # Fehler stillschweigend
+
 if "ergebnis" not in st.session_state:
     st.session_state.ergebnis = None
 if "wetter_info" not in st.session_state:
@@ -1641,6 +1694,88 @@ profil = st.session_state.profil
 
 with st.sidebar:
     st.title("⚙️ Mein Profil")
+
+    # ── Profil speichern / laden ──
+    with st.expander("💾 Profil speichern & laden", expanded=False):
+        if _LOCAL_STORAGE_OK:
+            st.success(
+                "✅ **Auto-Save aktiv:** Dein Profil wird automatisch in "
+                "deinem Browser gespeichert und beim nächsten Besuch geladen. "
+                "Funktioniert ohne Login, nur in **diesem Browser auf diesem Gerät**."
+            )
+        else:
+            st.warning(
+                "⚠️ Auto-Save derzeit nicht verfügbar (Komponente fehlt). "
+                "Bitte unten manuell speichern/laden."
+            )
+
+        st.markdown("**Manuelles Backup / Geräteübertragung:**")
+        st.caption(
+            "Lade dein Profil als JSON-Datei herunter, um es als Backup zu sichern "
+            "oder auf einem anderen Gerät / in einem anderen Browser zu nutzen."
+        )
+
+        # Export
+        try:
+            profil_json_export = json.dumps(profil, indent=2, ensure_ascii=False)
+            sichere_dateiname = (
+                "".join(c if c.isalnum() or c in "-_" else "_"
+                        for c in profil.get("name", "profil"))
+                or "profil"
+            )
+            st.download_button(
+                "📥 Profil als .json herunterladen",
+                data=profil_json_export,
+                file_name=f"fueling_profile_{sichere_dateiname}.json",
+                mime="application/json",
+                use_container_width=True,
+                key="profil_export_btn",
+            )
+        except Exception as ex:
+            st.error(f"Export-Fehler: {ex}")
+
+        # Import
+        upload = st.file_uploader(
+            "📤 Profil aus .json laden",
+            type=["json"],
+            key="profil_upload",
+            help="Lade eine zuvor exportierte Profildatei hoch. "
+                 "Fehlende Felder werden automatisch mit Standardwerten ergänzt.",
+        )
+        if upload is not None:
+            try:
+                geladen_raw = json.loads(upload.read().decode("utf-8"))
+                st.session_state.profil = _merge_profil_mit_defaults(
+                    geladen_raw, DEFAULT_PROFIL
+                )
+                # Storage-Flag zurücksetzen, damit der neue Stand vom Auto-Save
+                # am Ende der Sidebar ins localStorage geschrieben wird
+                st.session_state.pop("_profil_last_saved", None)
+                st.success(
+                    f"✅ Profil '{geladen_raw.get('name', 'Unbenannt')}' geladen."
+                )
+                st.rerun()
+            except json.JSONDecodeError:
+                st.error("Die Datei ist keine gültige JSON-Datei.")
+            except Exception as ex:
+                st.error(f"Fehler beim Laden: {ex}")
+
+        # Reset
+        st.markdown("---")
+        if st.button("🗑️ Auf Standardwerte zurücksetzen",
+                     use_container_width=True,
+                     help="Setzt alle Profil-Einstellungen auf die Werkseinstellung zurück."):
+            st.session_state.profil = copy.deepcopy(DEFAULT_PROFIL)
+            if _localS is not None:
+                try:
+                    _localS.deleteItem(_PROFIL_STORAGE_KEY,
+                                       key="profil_reset_delete")
+                except Exception:
+                    pass
+            st.success("Profil zurückgesetzt.")
+            st.rerun()
+
+    st.markdown("---")
 
     # ── Feedback ──
     st.markdown("### 💬 Feedback & Support")
@@ -1994,6 +2129,21 @@ with st.sidebar:
             help="Wert aus der Nährwerttabelle auf der Produktverpackung. 0 = nicht bekannt."
         )
     el["mineralien_pro_portion_mg"] = min_mg
+
+
+# ── Auto-Save: Profil in localStorage schreiben, wenn sich etwas geändert hat ──
+# Wir vergleichen einen serialisierten Snapshot, um unnötige setItem-Aufrufe
+# (und damit unnötige Reruns durch den localStorage-Component) zu vermeiden.
+if _localS is not None:
+    try:
+        profil_snapshot = json.dumps(st.session_state.profil, sort_keys=True,
+                                     ensure_ascii=False)
+        if st.session_state.get("_profil_last_saved") != profil_snapshot:
+            _localS.setItem(_PROFIL_STORAGE_KEY, profil_snapshot,
+                            key="profil_auto_save")
+            st.session_state._profil_last_saved = profil_snapshot
+    except Exception:
+        pass  # Fail silently — sonst wirft die App bei jedem Rerun
 
 
 # ══════════════════════════════════════════════════════════════════════════════
